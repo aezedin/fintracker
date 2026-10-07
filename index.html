@@ -961,7 +961,7 @@ function importSheet(acctId){
   ensureReal();const a=acctById(real,acctId);
   openSheet(`<div><h2 style="margin-bottom:6px">Import into ${esc(a.name)}</h2>
    <p class="small muted" style="margin:0 0 10px">Choose a statement from this bank: the <strong>PDF</strong> from the banking app, or a <strong>CSV</strong> from online banking. It's read on this phone and never uploaded.</p>
-   <div class="field"><label for="iFile">Statement (PDF or CSV)</label><input id="iFile" type="file" accept=".pdf,.csv,application/pdf,text/csv"></div>
+   <div class="field"><label for="iFile">Statements (PDF or CSV)</label><input id="iFile" type="file" multiple accept=".pdf,.csv,application/pdf,text/csv"><span class="small muted">You can pick several months at once.</span></div>
    <div id="iOut"></div>
    <div class="row" style="justify-content:flex-end;margin-top:8px"><button class="btn" type="button" id="iCancel">Cancel</button><button class="btn primary" type="button" id="iGo" disabled>Import</button></div></div>`,()=>{
     $("#iCancel").onclick=closeSheet;let parsed=[];
@@ -979,16 +979,29 @@ function importSheet(acctId){
         :`<p class="err">No new payments found${b.dupes?`. All ${b.dupes} were already imported`:""}.</p>`;
       $("#iGo").disabled=!parsed.length;
     };
-    $("#iFile").addEventListener("change",e=>{const file=e.target.files[0];if(!file)return;
+    const readFile=file=>new Promise(res=>{
       const isPdf=/\.pdf$/i.test(file.name)||file.type==="application/pdf";
-      out.innerHTML=`<p class="muted small" style="margin:0">Reading ${isPdf?"PDF":"file"}…</p>`;$("#iGo").disabled=true;
       const r=new FileReader();
-      r.onerror=()=>show({error:"Couldn't read that file."});
+      r.onerror=()=>res({error:"Couldn't read "+file.name+"."});
       r.onload=async()=>{
-        try{show(isPdf?await pdfItems(new Uint8Array(r.result)):csvItems(String(r.result)));}
-        catch(err){show({error:isPdf?"Couldn't read this PDF. Check you're online the first time you import a PDF, then try again.":"Couldn't read that file."});}
+        try{res(isPdf?await pdfItems(new Uint8Array(r.result)):csvItems(String(r.result)));}
+        catch(err){res({error:isPdf?"Couldn't read "+file.name+". Check you're online the first time you import a PDF.":"Couldn't read "+file.name+"."});}
       };
       if(isPdf)r.readAsArrayBuffer(file);else r.readAsText(file);
+    });
+    $("#iFile").addEventListener("change",async e=>{
+      const files=[...e.target.files];if(!files.length)return;
+      $("#iGo").disabled=true;
+      const items=[],errors=[];let skipped=0;
+      for(let i=0;i<files.length;i++){
+        out.innerHTML=`<p class="muted small" style="margin:0">Reading ${files.length>1?`file ${i+1} of ${files.length}`:"file"}…</p>`;
+        const res=await readFile(files[i]);
+        if(res.error)errors.push(files.length>1?files[i].name+": "+res.error:res.error);else{items.push(...res.items);skipped+=res.skipped||0;}
+      }
+      if(!items.length){show({error:errors.join(" ")||"No payments found."});return;}
+      show({items,skipped});
+      if(errors.length)out.insertAdjacentHTML("afterbegin",`<p class="err">${errors.map(esc).join("<br>")}</p>`);
+      if(files.length>1)out.insertAdjacentHTML("afterbegin",`<p class="small muted" style="margin:0 0 4px">${files.length-errors.length} of ${files.length} files read.</p>`);
     });
     $("#iGo").onclick=()=>{
       const flip=$("#iFlip")&&$("#iFlip").checked;
