@@ -1,5 +1,5 @@
 /* Abdu's Fintracker service worker: offline cache + notifications */
-const VERSION = "fintracker-v6";
+const VERSION = "fintracker-v7";
 const FILES = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png", "./apple-touch-icon.png"];
 
 self.addEventListener("install", (e) => {
@@ -45,14 +45,14 @@ function goalSaved(st, g) {
 function monthlyGoal(st) {
   const gs = st.goals || [];
   if (!gs.length) return st.goal || 0;
-  return gs.filter((g) => goalSaved(st, g) < g.target).reduce((a, g) => a + (g.monthly || 0), 0);
+  const per = { weekly: 12 / 52, monthly: 1, quarterly: 3, half: 6 };
+  return gs.filter((g) => goalSaved(st, g) < g.target).reduce((a, g) => a + (g.monthly || 0) / (per[g.freq] || 1), 0);
 }
 function paydaySummary(st) {
   const gs = (st && st.goals || []).filter((g) => goalSaved(st, g) < g.target);
   if (!gs.length) return null;
   const parts = gs.slice(0, 3).map((g) => `${g.name} ${Math.round(goalSaved(st, g) / g.target * 100)}%`);
-  const monthly = gs.reduce((a, g) => a + (g.monthly || 0), 0);
-  return `${parts.join(" · ")}. Plan for this month: ${gbp(monthly)}. Tap to choose how much to put aside.`;
+  return `${parts.join(" · ")}. Tap to choose how much to put aside this month.`;
 }
 function weeklySummary(st) {
   if (!st) return null;

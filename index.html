@@ -299,8 +299,34 @@ function makeDemo(){
 function allTx(st){return Object.values(st.months).flat();}
 function goalSaved(st,g){return Math.round(((g.startSaved||0)+allTx(st).filter(x=>x.kind==="save"&&x.goalId===g.id).reduce((a,b)=>a+b.amt,0))*100)/100;}
 function activeGoals(st){return (st.goals||[]).filter(g=>goalSaved(st,g)<g.target-0.005);}
-function goalOf(st){const gs=activeGoals(st);return (st.goals||[]).length?Math.round(gs.reduce((a,g)=>a+(g.monthly||0),0)*100)/100:(st.goal||0);}
-function goalEta(st,g,monthly){const left=g.target-goalSaved(st,g);if(left<=0)return {n:0,label:"Reached"};const m=monthly??g.monthly;if(!(m>0))return {n:Infinity,label:"No monthly amount set"};const n=Math.ceil(left/m-1e-9);return {n,label:monthsFromNow(n)};}
+/* How often a goal gets money: g.monthly holds the amount saved EACH time, g.freq how often. */
+const FREQ={weekly:{m:12/52,per:"a week",each:"each week"},monthly:{m:1,per:"a month",each:"each month"},quarterly:{m:3,per:"every 3 months",each:"every 3 months"},half:{m:6,per:"every 6 months",each:"every 6 months"}};
+const gf=g=>FREQ[g&&g.freq]?g.freq:"monthly";
+const monthlyEq=g=>(g.monthly||0)/FREQ[gf(g)].m;
+const mIdx=k=>{const[y,m]=k.split("-").map(Number);return y*12+m-1;};
+const mKeyOf=i=>Math.floor(i/12)+"-"+pad(i%12+1);
+const mLabel=k=>parseISO(k+"-01").toLocaleDateString("en-GB",{month:"short",year:"numeric"});
+function isDueMonth(freq,startMonth,key){if(freq==="weekly"||freq==="monthly")return true;const d=mIdx(key)-mIdx(startMonth||key);return d>=0&&d%FREQ[freq].m===0;}
+function nextDueMonth(freq,startMonth,fromKey){for(let i=mIdx(fromKey);i<mIdx(fromKey)+24;i++){const k=mKeyOf(i);if(isDueMonth(freq,startMonth,k))return k;}return fromKey;}
+/* When will "left" be covered by "each" on this schedule? Counts this month's saving as the first one. */
+function etaFor(left,each,freq,startMonth){
+  if(left<=0)return {n:0,label:"Reached"};
+  if(!(each>0))return {n:Infinity,label:"No amount set yet"};
+  const n=Math.ceil(left/each-1e-9);
+  if(freq==="weekly")return {n,label:addDays(today(),7*(n-1)).toLocaleDateString("en-GB",{month:"short",year:"numeric"})};
+  let cnt=0;const now=mIdx(monthKey(today()));
+  for(let i=now;i<now+1200;i++){if(isDueMonth(freq,startMonth,mKeyOf(i))){cnt++;if(cnt>=n)return {n,label:mLabel(mKeyOf(i))};}}
+  return {n,label:"a long way off"};
+}
+/* How many savings fit before a "finish by" date (that month itself excluded, since payday may come after). */
+function paymentsBefore(byIso,freq,startMonth){
+  if(freq==="weekly")return Math.max(1,Math.floor((parseISO(byIso)-today())/DAY/7));
+  let cnt=0;const now=mIdx(monthKey(today())),end=mIdx(byIso.slice(0,7));
+  for(let i=now;i<end;i++)if(isDueMonth(freq,startMonth,mKeyOf(i)))cnt++;
+  return Math.max(1,cnt);
+}
+function goalOf(st){const gs=activeGoals(st);return (st.goals||[]).length?Math.round(gs.reduce((a,g)=>a+monthlyEq(g),0)*100)/100:(st.goal||0);}
+function goalEta(st,g){return etaFor(g.target-goalSaved(st,g),g.monthly,gf(g),g.startMonth);}
 function monthsBetween(toIso){const t=today(),d=parseISO(toIso);return (d.getFullYear()-t.getFullYear())*12+(d.getMonth()-t.getMonth());}
 function acctById(st,id){return st.accounts.find(a=>a.id===id)||{name:"No bank",color:"#888"};}
 function subMonthly(x){return x.cycle==="weekly"?x.amount*WEEKS_PER_MONTH:x.cycle==="yearly"?x.amount/12:x.amount;}
@@ -533,13 +559,15 @@ function viewGoals(st,c){
   const pd=st.payday;
   const card=g=>{const sv=goalSaved(st,g),p=Math.min(100,sv/g.target*100),done=sv>=g.target-0.005,eta=goalEta(st,g);
     let byLine="";
-    if(g.by&&!done){const months=Math.max(1,monthsBetween(g.by));const need=(g.target-sv)/months;byLine=`<p class="small" style="margin:4px 0 0">To finish by <strong>${parseISO(g.by).toLocaleDateString("en-GB",{month:"short",year:"numeric"})}</strong> you need <span class="num">${gbp(need)}</span> a month${need>g.monthly+0.5?` <span class="chip warn">£${Math.ceil(need-g.monthly)} more than planned</span>`:` <span class="chip good">On track</span>`}</p>`;}
+    const per=FREQ[gf(g)].per;
+    if(g.by&&!done){const need=(g.target-sv)/paymentsBefore(g.by,gf(g),g.startMonth);byLine=`<p class="small" style="margin:4px 0 0">To finish by <strong>${parseISO(g.by).toLocaleDateString("en-GB",{month:"short",year:"numeric"})}</strong> you need <span class="num">${gbp(need)}</span> ${per}${need>g.monthly+0.5?` <span class="chip warn">£${Math.ceil(need-g.monthly)} more than planned</span>`:` <span class="chip good">On track</span>`}</p>`;}
+    const nextLine=(gf(g)==="quarterly"||gf(g)==="half")&&!done?`<p class="small muted" style="margin:4px 0 0">Next saving: ${mLabel(nextDueMonth(gf(g),g.startMonth,monthKey(today())))}</p>`:"";
     return `<div class="panel" style="padding:14px">
-      <div class="row" style="justify-content:space-between;align-items:flex-start"><strong style="overflow-wrap:anywhere;min-width:0">${esc(g.name)}</strong>${done?`<span class="chip good">Reached</span>`:`<span class="chip plain">${gbp(g.monthly)}/month</span>`}</div>
+      <div class="row" style="justify-content:space-between;align-items:flex-start"><strong style="overflow-wrap:anywhere;min-width:0">${esc(g.name)}</strong>${done?`<span class="chip good">Reached</span>`:`<span class="chip plain">${gbp(g.monthly)} ${per}</span>`}</div>
       <div class="row" style="align-items:baseline;gap:6px;margin-top:8px"><span class="num" style="font-size:1.35rem;font-family:var(--f-display);font-weight:700">${gbp2(sv)}</span><span class="muted small">of ${gbp(g.target)} · ${Math.round(p)}%</span></div>
       <div class="meter thin${done?" good":""}"><i style="width:${p}%"></i></div>
-      ${done?"":`<p class="small" style="margin:8px 0 0">${gbp(g.target-sv)} to go · ${isFinite(eta.n)?`at ${gbp(g.monthly)} a month you'll get there by about <strong>${eta.label}</strong>`:eta.label}</p>`}
-      ${byLine}
+      ${done?"":`<p class="small" style="margin:8px 0 0">${gbp(g.target-sv)} to go · ${isFinite(eta.n)?`at ${gbp(g.monthly)} ${per} you'll get there by about <strong>${eta.label}</strong>`:eta.label}</p>`}
+      ${byLine}${nextLine}
       <div class="row" style="margin-top:10px"><button class="btn sm primary" data-act="save-goal" data-id="${esc(g.id)}" type="button">Add money</button><button class="btn sm ghost" data-act="edit-goal" data-id="${esc(g.id)}" type="button">Edit</button></div>
     </div>`;};
   return `<div class="stack">
@@ -563,27 +591,40 @@ function goalSheet(existing){
    <div class="two"><div class="field"><label for="gTarget">Goal amount (£)</label><input id="gTarget" inputmode="decimal" value="${g.target}"></div>
    <div class="field"><label for="gStart">Already saved (£)</label><input id="gStart" inputmode="decimal" value="${g.startSaved||""}" placeholder="0"></div></div>
    <div class="field"><label for="gBy">Finish by (optional)</label><input id="gBy" type="date" value="${g.by||""}"></div>
-   <div class="field" style="background:var(--accent-soft);border-radius:10px;padding:12px"><label for="gMonthly"><strong>How much do you want to save each month for this?</strong></label><input id="gMonthly" inputmode="decimal" value="${g.monthly}" placeholder="e.g. 200"><span class="small" id="gHint" style="margin-top:4px"></span></div>
+   <div style="background:var(--accent-soft);border-radius:10px;padding:12px;margin-bottom:12px">
+     <div class="field"><label><strong>How often do you want to save for this?</strong></label>${seg("freq",[["weekly","Weekly"],["monthly","Monthly"],["quarterly","Every 3 mo"],["half","Every 6 mo"]],gf(g))}</div>
+     <div class="field" id="gStartWrap"><label for="gStartMonth">First saving month</label><input id="gStartMonth" type="month" value="${g.startMonth||monthKey(today())}"></div>
+     <div class="field" style="margin:0"><label for="gMonthly"><strong id="gAmtLabel">How much each time?</strong></label><input id="gMonthly" inputmode="decimal" value="${g.monthly}" placeholder="e.g. 200"><span class="small" id="gHint" style="margin-top:6px"></span></div>
+   </div>
    <div class="err" id="gErr"></div>
    <div class="row" style="justify-content:space-between"><span>${existing?`<button class="btn danger ghost" type="button" id="gDel">Delete</button>`:""}</span><span class="row"><button class="btn" type="button" id="gCancel">Cancel</button><button class="btn primary" type="submit">${existing?"Save":"Add goal"}</button></span></div>
   </form>`,()=>{
     $("#gCancel").onclick=closeSheet;
-    const hint=()=>{const target=money($("#gTarget").value),start=money($("#gStart").value)||0,m=money($("#gMonthly").value),by=$("#gBy").value;const left=target-start-(existing?goalSaved(real,existing)-(existing.startSaved||0):0);
+    bindSeg();
+    const hint=()=>{
+      const freq=segVal("freq")||"monthly",per=FREQ[freq].per,startM=$("#gStartMonth").value||monthKey(today());
+      $("#gStartWrap").hidden=!(freq==="quarterly"||freq==="half");
+      $("#gAmtLabel").textContent=freq==="weekly"?"How much do you want to save each week?":freq==="monthly"?"How much do you want to save each month?":`How much do you want to save ${per}?`;
+      const target=money($("#gTarget").value),start=money($("#gStart").value)||0,m=money($("#gMonthly").value),by=$("#gBy").value;
+      const left=target-start-(existing?goalSaved(real,existing)-(existing.startSaved||0):0);
       let h="";
       if(!(target>0)){$("#gHint").innerHTML="";return;}
       if(left<=0){$("#gHint").innerHTML="You've already saved enough for this.";return;}
-      if(m>0){const n=Math.ceil(left/m-1e-9);h=`At ${gbp(m)} a month you'll reach ${gbp(target)} by about <strong>${monthsFromNow(n)}</strong> (${n} month${n===1?"":"s"}).`;}
-      if(by){const months=Math.max(1,monthsBetween(by));const need=Math.ceil(left/months);h+=`${h?" ":""}To finish by ${parseISO(by).toLocaleDateString("en-GB",{month:"short",year:"numeric"})} you'd need <strong>${gbp(need)}</strong> a month. <button class="btn sm" type="button" id="gUse">Use ${gbp(need)}</button>`;}
-      if(!h)h="Type a monthly amount to see when you'll reach it.";
-      $("#gHint").innerHTML=h;const u=$("#gUse");if(u)u.onclick=()=>{$("#gMonthly").value=Math.ceil(left/Math.max(1,monthsBetween(by)));hint();};};
-    ["gTarget","gStart","gMonthly","gBy"].forEach(id=>$("#"+id).addEventListener("input",hint));hint();
+      h=`<strong>${gbp(left)}</strong> still to save. `;
+      if(m>0){const e=etaFor(left,m,freq,startM);h+=`At ${gbp(m)} ${per} that's ${e.n} saving${e.n===1?"":"s"}, done by about <strong>${e.label}</strong>.`;}
+      if(by){const pays=paymentsBefore(by,freq,startM);const need=Math.ceil(left/pays);h+=` To finish by ${parseISO(by).toLocaleDateString("en-GB",{month:"short",year:"numeric"})} you'd need <strong>${gbp(need)}</strong> ${per} (${pays} saving${pays===1?"":"s"}). <button class="btn sm" type="button" id="gUse">Use ${gbp(need)}</button>`;}
+      if(!(m>0)&&!by)h+="Type an amount to see when you'll reach it.";
+      $("#gHint").innerHTML=h;const u=$("#gUse");if(u)u.onclick=()=>{$("#gMonthly").value=Math.ceil(left/paymentsBefore(by,freq,startM));hint();};};
+    ["gTarget","gStart","gMonthly","gBy","gStartMonth"].forEach(id=>$("#"+id).addEventListener("input",hint));
+    $('#sheetRoot .seg[data-seg="freq"]').addEventListener("change",hint);hint();
     if(existing){const del=$("#gDel");del.onclick=()=>{if(del.dataset.armed){real.goals=real.goals.filter(x=>x.id!==existing.id);saveAll();closeSheet();render();toast("Goal deleted. Money already logged stays in your savings history.");}else{del.dataset.armed="1";del.textContent="Tap again to delete";}};}
     $("#goalForm").addEventListener("submit",e=>{e.preventDefault();
       const name=$("#gName").value.trim(),target=money($("#gTarget").value),start=money($("#gStart").value),monthly=money($("#gMonthly").value),by=$("#gBy").value;
       if(!name){$("#gErr").textContent="Give the goal a name.";return;}
       if(!(target>0)){$("#gErr").textContent="Enter the amount you want to reach.";return;}
-      if(!(monthly>0)){$("#gErr").textContent="Enter how much you'll save each month for it.";return;}
-      const rec={id:existing?existing.id:uid(),name,target,startSaved:start>0?start:0,monthly,by:by||"",created:existing?existing.created:iso(today())};
+      if(!(monthly>0)){$("#gErr").textContent="Enter how much you'll save each time.";return;}
+      const freq=segVal("freq")||"monthly";
+      const rec={id:existing?existing.id:uid(),name,target,startSaved:start>0?start:0,monthly,freq,startMonth:(freq==="quarterly"||freq==="half")?($("#gStartMonth").value||monthKey(today())):"",by:by||"",created:existing?existing.created:iso(today())};
       if(existing)real.goals=real.goals.map(x=>x.id===rec.id?rec:x);else (real.goals=real.goals||[]).push(rec);
       saveAll();closeSheet();render();toast(existing?"Goal saved":"Goal added");});
   });
@@ -634,11 +675,12 @@ function checkinSheet(auto){
    ${gs.map(g=>{const sv=goalSaved(st,g),p=Math.min(100,sv/g.target*100),eta=goalEta(st,g);return `<div style="padding:10px 0;border-top:1px solid var(--line)">
      <div class="row" style="justify-content:space-between"><strong style="overflow-wrap:anywhere;min-width:0">${esc(g.name)}</strong><span class="num small">${gbp(sv)} / ${gbp(g.target)}</span></div>
      <div class="meter thin"><i style="width:${p}%"></i></div>
-     <p class="small muted" style="margin:6px 0">${Math.round(p)}% there · ${isFinite(eta.n)?`done by about ${eta.label} at ${gbp(g.monthly)}/month`:eta.label}</p>
-     <div class="field" style="margin:0"><label for="ci_${esc(g.id)}">Save this month (£)</label><input id="ci_${esc(g.id)}" data-goal="${esc(g.id)}" inputmode="decimal" value="${g.monthly}"></div>
+     <p class="small muted" style="margin:6px 0">${Math.round(p)}% there · ${isFinite(eta.n)?`done by about ${eta.label} at ${gbp(g.monthly)} ${FREQ[gf(g)].per}`:eta.label}</p>
+     ${(()=>{const due=isDueMonth(gf(g),g.startMonth,monthKey(today()));const sugg=gf(g)==="weekly"?Math.round(g.monthly*52/12):due?g.monthly:0;
+       return `${due?"":`<p class="small" style="margin:0 0 6px"><span class="chip plain">Not due this month</span> Next saving: ${mLabel(nextDueMonth(gf(g),g.startMonth,monthKey(today())))}. You can still add something.</p>`}<div class="field" style="margin:0"><label for="ci_${esc(g.id)}">Save this month (£)${gf(g)==="weekly"?` <span class="muted small">(${gbp(g.monthly)} × about 4 weeks)</span>`:""}</label><input id="ci_${esc(g.id)}" data-goal="${esc(g.id)}" data-freq="${gf(g)}" inputmode="decimal" value="${sugg||""}" placeholder="0"></div>`;})()}
    </div>`;}).join("")}
    <div class="field" style="margin-top:10px"><label for="ciAcct">Moving it from</label><select id="ciAcct">${acctOptions(st,st.accounts[0].id)}</select></div>
-   <label class="row small" style="gap:8px;flex-wrap:nowrap;align-items:flex-start;margin-bottom:10px"><input type="checkbox" id="ciKeep" style="margin-top:3px"><span>Make these my monthly amounts from now on</span></label>
+   <label class="row small" style="gap:8px;flex-wrap:nowrap;align-items:flex-start;margin-bottom:10px"><input type="checkbox" id="ciKeep" style="margin-top:3px"><span>Use these amounts as my plan from now on</span></label>
    <p style="margin:0 0 10px">Total: <strong class="num" id="ciTotal"></strong></p>
    <div class="err" id="ciErr"></div>
    <div class="row" style="justify-content:space-between"><button class="btn ghost" type="button" id="ciSkip">Skip this month</button><span class="row"><button class="btn" type="button" id="ciLater">Later</button><button class="btn primary" type="submit">Save</button></span></div>
@@ -652,7 +694,7 @@ function checkinSheet(auto){
       const acct=$("#ciAcct").value,keep=$("#ciKeep").checked,d=iso(today());let n=0;
       for(const i of inputs){const v=money(i.value);if(i.value.trim()&&!(v>=0)){$("#ciErr").textContent="Amounts must be numbers, like 150.";return;}}
       inputs.forEach(i=>{const v=money(i.value);const g=real.goals.find(x=>x.id===i.dataset.goal);if(!g)return;
-        if(keep&&v>0)g.monthly=v;
+        if(keep&&v>0&&gf(g)!=="weekly"&&isDueMonth(gf(g),g.startMonth,monthKey(today())))g.monthly=v;
         if(v>0){const tx={id:uid(),d,amt:v,kind:"save",acct,cat:"Savings",note:"Saved for "+g.name,goalId:g.id};const k=d.slice(0,7);(real.months[k]=real.months[k]||[]).push(tx);n++;}});
       real.lastCheckin=monthKey(today());saveAll();closeSheet();render();
       const reached=real.goals.filter(g=>goalSaved(real,g)>=g.target-0.005).map(g=>g.name);
