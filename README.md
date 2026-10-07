@@ -2,7 +2,7 @@
 
 A personal money tracker that installs on an iPhone home screen.
 
-- Spending across several banks (CSV statement import)
+- Spending across several banks (PDF or CSV statement import, read on the phone)
 - Subscriptions and debts, with due dates
 - Weekly spending against a budget
 - Monthly savings goal

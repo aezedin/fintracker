@@ -455,7 +455,7 @@ function tips(st,c){
   if(eo>15) out.push(`Eating out and takeaways: <span class="num">${gbp2(eo)}</span> so far this month. Halving it adds about <strong class="num">${gbp(eo/2/(c.t.getDate())*daysInMonth(c.t))}</strong> to savings by month end.`);
   let worst=null;for(const[k,v] of Object.entries(c.catMonth)){if(FIXED.has(k))continue;const l=c.catLast[k]||0;if(l>0&&v-l>10&&(!worst||v-l>worst.d))worst={k,d:v-l,v,l};}
   if(worst) out.push(`${esc(worst.k)} is up <strong class="num">${gbp(worst.d)}</strong> on the same point last month (<span class="num">${gbp(worst.v)}</span> vs <span class="num">${gbp(worst.l)}</span>).`);
-  if(out.length<3) out.push(`Import a statement from each bank so every payment is counted. Recurring payments are spotted automatically on the Subscriptions tab.`);
+  if(out.length<3) out.push(`Import a statement (PDF or CSV) from each bank so every payment is counted. Recurring payments are spotted automatically on the Subscriptions tab.`);
   return out.slice(0,4);
 }
 
@@ -558,12 +558,12 @@ function viewBanks(st,c){
   return `<div class="stack">
   <section class="panel">
     <div class="row" style="justify-content:space-between;margin-bottom:6px"><h2>Your banks</h2><button class="btn sm primary" data-act="add-bank" type="button">Add bank</button></div>
-    ${st.accounts.length?`<div class="list">${st.accounts.map(a=>`<div class="item"><span class="dot" style="background:${esc(a.color)}"></span><div class="main"><div class="name">${esc(a.name)}</div><div class="small muted">${counts[a.id]||0} transactions · <span class="num">${gbp2(c.bankMonth[a.id]||0)}</span> spent this month</div></div><div class="row" style="justify-content:flex-end"><button class="btn sm" data-act="import" data-id="${esc(a.id)}" type="button">Import CSV</button><button class="btn sm ghost" data-act="edit-bank" data-id="${esc(a.id)}" type="button">Edit</button></div></div>`).join("")}</div>`:`<div class="empty">Add each bank or card you use, for example Monzo, Barclays or Santander.</div>`}
+    ${st.accounts.length?`<div class="list">${st.accounts.map(a=>`<div class="item"><span class="dot" style="background:${esc(a.color)}"></span><div class="main"><div class="name">${esc(a.name)}</div><div class="small muted">${counts[a.id]||0} transactions · <span class="num">${gbp2(c.bankMonth[a.id]||0)}</span> spent this month</div></div><div class="row" style="justify-content:flex-end"><button class="btn sm" data-act="import" data-id="${esc(a.id)}" type="button">Import statement</button><button class="btn sm ghost" data-act="edit-bank" data-id="${esc(a.id)}" type="button">Edit</button></div></div>`).join("")}</div>`:`<div class="empty">Add each bank or card you use, for example Monzo, Barclays or Santander.</div>`}
   </section>
   <section class="panel">
     <h2 style="margin-bottom:6px">Importing statements</h2>
-    <p style="margin:0 0 8px">Most UK banks let you download transactions as a <strong>CSV</strong> file from the app or online banking (usually under statements or transactions, as "export" or "download"). Pick <strong>Import CSV</strong> next to the bank and choose that file.</p>
-    <p class="small muted" style="margin:0">The file is read on your device. Only the date, amount and description of each payment are kept, and payments already imported are skipped. Categories are guessed from the shop name and can be changed with <em>Edit</em>.</p>
+    <p style="margin:0 0 8px">Pick <strong>Import statement</strong> next to the bank and choose either the <strong>PDF statement</strong> from your banking app or a <strong>CSV</strong> download from online banking.</p>
+    <p class="small muted" style="margin:0">The file is read on this phone and never uploaded. Only the date, amount and description of each payment are kept, and payments already imported are skipped. Categories are guessed from the shop name and can be changed with <em>Edit</em>.</p>
   </section></div>`;
 }
 
@@ -836,51 +836,160 @@ function parseDate(s){s=(s||"").trim();let m;
   if(m=s.match(/^(\d{1,2})[\s-]([A-Za-z]{3})[A-Za-z]*[\s-](\d{2,4})/)){let y=+m[3];if(y<100)y+=2000;const mo=MON[m[2].toLowerCase()];if(mo)return y+"-"+pad(mo)+"-"+pad(+m[1]);}
   return null;}
 function findCol(h,res){for(const r of res){const i=h.findIndex(x=>r.test(x));if(i>=0)return i;}return -1;}
+/* ---- CSV → items ---- */
+function csvItems(text){
+  const rows=parseCSV(text);
+  const hi=rows.findIndex(rw=>rw.some(c=>/date/i.test(c)));
+  if(hi<0)return {error:`Couldn't find a "Date" column. Check this is the transactions file from your bank.`};
+  const h=rows[hi].map(x=>x.trim().toLowerCase());
+  const cDate=findCol(h,[/^date$/,/transaction date/,/date/]);
+  const cDesc=findCol(h,[/^name$/,/description/,/merchant/,/payee/,/details/,/narrative/,/memo/,/reference/,/counter ?party/]);
+  const cAmt=findCol(h,[/^amount$/,/amount/,/^value$/]);
+  const cOut=findCol(h,[/paid out/,/money out/,/debit/,/^out$/,/withdrawal/]);
+  const cIn=findCol(h,[/paid in/,/money in/,/credit/,/^in$/,/deposit/]);
+  const cCat=findCol(h,[/^category$/,/category/]);
+  if(cAmt<0&&cOut<0)return {error:"Couldn't find an amount column (looked for Amount, Paid out, Debit)."};
+  const items=[];let skipped=0;
+  rows.slice(hi+1).forEach(rw=>{const d=parseDate(rw[cDate]);if(!d){skipped++;return;}
+    let v;if(cAmt>=0&&cOut<0)v=money(rw[cAmt]);else{const o=money(rw[cOut]),i=cIn>=0?money(rw[cIn]):NaN;v=(i>0?i:0)-(o>0?o:0);if(!(o>0)&&!(i>0)&&cAmt>=0)v=money(rw[cAmt]);}
+    if(!isFinite(v)||v===0){skipped++;return;}
+    items.push({d,v,note:(cDesc>=0?rw[cDesc]:"").trim().replace(/\s{2,}/g," ").slice(0,80),bankCat:cCat>=0?(rw[cCat]||"").toLowerCase():""});});
+  return {items,skipped,flippable:true};
+}
+
+/* ---- PDF → items (read on this phone with pdf.js) ---- */
+let pdfjsPromise=null;
+function loadPdfJs(){
+  if(window.pdfjsLib)return Promise.resolve(window.pdfjsLib);
+  if(!pdfjsPromise)pdfjsPromise=new Promise((res,rej)=>{const s=document.createElement("script");s.src="vendor/pdf.min.js";
+    s.onload=()=>{try{window.pdfjsLib.GlobalWorkerOptions.workerSrc="vendor/pdf.worker.min.js";res(window.pdfjsLib);}catch(e){rej(e);}};
+    s.onerror=()=>{pdfjsPromise=null;rej(new Error("load"));};document.head.appendChild(s);});
+  return pdfjsPromise;
+}
+const AMT_RE=/^\(?-?£?\s?\d{1,3}(?:,\d{3})*\.\d{2}\)?(?:\s?(?:CR|DR|D|C|-))?$/i;
+const TYPE_CODES=/\s+(DEB|DD|SO|FPO|FPI|BGC|CPT|TFR|CHG|BP|DEP|PAY|CR|DR|COR|FEE|INT|CSH|ATM|POS|BAC|D\/D|S\/O)$/i;
+function amtVal(s){const neg=/^\(|\)$|-$|^-|DR$|D$/i.test(s.trim())&&!/CR$|C$/i.test(s.trim());const n=parseFloat(s.replace(/[^0-9.]/g,""));return {n,neg};}
+const MONTHS3="jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec";
+const LEAD_DATE=new RegExp("^(\\d{1,2}[\\/.-]\\d{1,2}[\\/.-]\\d{2,4}|\\d{4}-\\d{2}-\\d{2}|\\d{1,2}(?:st|nd|rd|th)?[\\s-](?:"+MONTHS3+")[a-z]*\\.?(?:[\\s-]\\d{2,4})?)\\b","i");
+function pdfDate(s,docYear){
+  let d=parseDate(s.replace(/(\d)(st|nd|rd|th)/i,"$1").replace(/\./g,""));if(d)return d;
+  const m=s.match(new RegExp("^(\\d{1,2})(?:st|nd|rd|th)?[\\s-]("+MONTHS3+")","i"));
+  if(m){const mo=MON[m[2].toLowerCase()];let dt=new Date(docYear,mo-1,+m[1]);if(dt>addDays(today(),2))dt=new Date(docYear-1,mo-1,+m[1]);return iso(dt);}
+  return null;
+}
+async function pdfItems(buf){
+  const lib=await loadPdfJs();
+  let doc;
+  try{doc=await lib.getDocument({data:buf,isEvalSupported:false}).promise;}
+  catch(e){if(e&&e.name==="PasswordException")return {error:"This PDF has a password. Download it again without one, or use the CSV."};return {error:"Couldn't open this PDF."};}
+  const lines=[];let allText="";
+  for(let p=1;p<=doc.numPages;p++){
+    const page=await doc.getPage(p);const tc=await page.getTextContent();
+    const its=tc.items.filter(i=>i.str&&i.str.trim()).map(i=>({x:i.transform[4],y:i.transform[5],w:i.width||0,s:i.str.trim()}));
+    its.sort((a,b)=>b.y-a.y||a.x-b.x);
+    let cur=null;
+    for(const it of its){if(cur&&Math.abs(cur.y-it.y)<=3){cur.items.push(it);}else{cur={y:it.y,page:p,items:[it]};lines.push(cur);}}
+    allText+=its.map(i=>i.s).join(" ")+" ";
+  }
+  if(allText.trim().length<20)return {error:"This PDF looks like a scanned picture, so there's no text to read. Use the CSV from online banking instead."};
+  const years={};(allText.match(/\b20\d{2}\b/g)||[]).forEach(y=>years[y]=(years[y]||0)+1);
+  let docYear=today().getFullYear();const ys=Object.keys(years).map(Number).filter(y=>y<=docYear+1);if(ys.length)docYear=Math.max(...ys);
+  let cols=null,lastDate=null,prevBal=null;const items=[];let skipped=0,unsure=0;
+  for(const ln of lines){
+    ln.items.sort((a,b)=>a.x-b.x);
+    // split items that glue words and an amount together, e.g. "TESCO 23.40"
+    const parts=[];ln.items.forEach(it=>{const bits=it.s.split(/\s{2,}/);if(bits.length===1){parts.push(it);return;}let x=it.x;const cw=it.w/Math.max(1,it.s.length);bits.forEach(b=>{parts.push({x,y:it.y,w:b.length*cw,s:b.trim()});x+=(b.length+2)*cw;});});
+    const text=parts.map(p=>p.s).join(" ");const low=text.toLowerCase();
+    // header row: remember where the money-out / money-in / balance columns are
+    if(/balance/.test(low)&&/(out|debit|withdraw|payments?|paid)/.test(low)&&/(\bin\b|credit|deposit|receipts?|paid in)/.test(low)&&!AMT_RE.test(parts[parts.length-1].s)){
+      const c={};parts.forEach(p=>{const l=p.s.toLowerCase();const r=p.x+p.w;
+        if(/balance/.test(l))c.bal=r;else if(/out|debit|withdraw|payments?(?! in)|paid out/.test(l))c.out=r;else if(/\bin\b|credit|deposit|receipt/.test(l))c.in=r;});
+      if(c.out!=null||c.in!=null)cols=c;continue;}
+    const amts=parts.filter(p=>AMT_RE.test(p.s));
+    if(/brought forward|opening balance|balance b\/f|previous balance|start balance|balance from/i.test(low)){if(amts.length){const a=amtVal(amts[amts.length-1].s);prevBal=a.neg?-a.n:a.n;}continue;}
+    if(/carried forward|closing balance|balance c\/f|end balance|^total|total (payments|receipts|money|paid)/i.test(low))continue;
+    const m=text.match(LEAD_DATE);
+    let d=m?pdfDate(m[1],docYear):null;
+    if(!amts.length){continue;}
+    if(d)lastDate=d;else if(lastDate&&!/^\d/.test(text))d=lastDate;else{skipped++;continue;}
+    const firstAmtX=amts[0].x;
+    let desc=parts.filter(p=>p.x<firstAmtX&&!AMT_RE.test(p.s)).map(p=>p.s).join(" ");
+    if(m)desc=desc.replace(LEAD_DATE,"").trim();
+    desc=desc.replace(TYPE_CODES,"").replace(/^(DEB|DD|SO|FPO|FPI|BGC|CPT|TFR|BP|DEP)\s+/i,"").replace(/\s{2,}/g," ").trim().slice(0,80);
+    let v=null,bal=null;
+    if(cols){
+      let outAmt=null,inAmt=null;
+      amts.forEach(a=>{const r=a.x+a.w;const cand=[["out",cols.out],["in",cols.in],["bal",cols.bal]].filter(c=>c[1]!=null).map(c=>[c[0],Math.abs(c[1]-r)]).sort((x,y)=>x[1]-y[1]);
+        const k=cand[0]&&cand[0][0];const av=amtVal(a.s);
+        if(k==="bal")bal=av.neg?-av.n:av.n;else if(k==="out")outAmt=av.n;else if(k==="in")inAmt=av.n;});
+      if(outAmt!=null)v=-outAmt;else if(inAmt!=null)v=inAmt;
+    }
+    if(v==null){
+      const first=amtVal(amts[0].s);
+      if(amts.length>=2){const lb=amtVal(amts[amts.length-1].s);bal=lb.neg?-lb.n:lb.n;}
+      if(first.neg)v=-first.n;
+      else if(bal!=null&&prevBal!=null){v=Math.abs((bal-prevBal)-(-first.n))<0.011?-first.n:Math.abs((bal-prevBal)-first.n)<0.011?first.n:-first.n;}
+      else{v=/salary|wages|universal credit|dwp|hmrc|refund|transfer from|interest paid|received|bgc|fpi/i.test(text)?first.n:-first.n;unsure++;}
+    }
+    if(bal!=null)prevBal=bal;
+    if(!(Math.abs(v)>0)){skipped++;continue;}
+    items.push({d,v,note:desc,bankCat:""});
+  }
+  if(!items.length)return {error:"Couldn't find any transactions in this PDF. If it's a statement, try the CSV from online banking instead, or tell Claude which bank it's from."};
+  return {items,skipped,unsure,flippable:false};
+}
+
+/* ---- items → new payments (shared by CSV and PDF) ---- */
+function buildRecords(items,acctId){
+  const existing=new Set(allTx(real).filter(t=>t.acct===acctId).map(t=>t.d+"|"+t.amt+"|"+t.note.toLowerCase()));
+  const parsed=[];let dupes=0,skipped=0;
+  items.forEach(({d,v,note,bankCat})=>{
+    note=note||"Payment";const amt=Math.round(Math.abs(v)*100)/100;
+    const savingLike=/savings|save the change|\bpot\b|round ?up|\bisa\b/i.test(note);
+    if(v>0&&savingLike){skipped++;return;}
+    const kind=v<0?(savingLike?"save":"spend"):"income";
+    let cat=kind==="spend"?guessCat(note):kind==="save"?"Savings":"Income";
+    if(kind==="spend"&&cat==="Other"&&bankCat){if(/groceries/.test(bankCat))cat="Groceries";else if(/eating|food|takeaway/.test(bankCat))cat="Eating out";else if(/transport|travel/.test(bankCat))cat="Transport";else if(/bills/.test(bankCat))cat="Bills";else if(/shopping/.test(bankCat))cat="Shopping";else if(/entertainment/.test(bankCat))cat="Fun";}
+    const key=d+"|"+amt+"|"+note.toLowerCase();if(existing.has(key)){dupes++;return;}existing.add(key);
+    const rec={id:uid(),d,amt,kind,acct:acctId,cat,note};
+    if(kind==="spend"){const nl=note.toLowerCase();const dm=(real.debts||[]).find(y=>y.match&&nl.includes(y.match.toLowerCase()));if(dm){rec.cat="Debt repayment";rec.debtId=dm.id;}}
+    parsed.push(rec);});
+  return {parsed,dupes,skipped};
+}
+
 function importSheet(acctId){
   ensureReal();const a=acctById(real,acctId);
   openSheet(`<div><h2 style="margin-bottom:6px">Import into ${esc(a.name)}</h2>
-   <p class="small muted" style="margin:0 0 10px">Choose the CSV file you downloaded from this bank.</p>
-   <div class="field"><label for="iFile">Statement file (.csv)</label><input id="iFile" type="file" accept=".csv,text/csv"></div>
+   <p class="small muted" style="margin:0 0 10px">Choose a statement from this bank: the <strong>PDF</strong> from the banking app, or a <strong>CSV</strong> from online banking. It's read on this phone and never uploaded.</p>
+   <div class="field"><label for="iFile">Statement (PDF or CSV)</label><input id="iFile" type="file" accept=".pdf,.csv,application/pdf,text/csv"></div>
    <div id="iOut"></div>
    <div class="row" style="justify-content:flex-end;margin-top:8px"><button class="btn" type="button" id="iCancel">Cancel</button><button class="btn primary" type="button" id="iGo" disabled>Import</button></div></div>`,()=>{
     $("#iCancel").onclick=closeSheet;let parsed=[];
-    $("#iFile").addEventListener("change",e=>{const file=e.target.files[0];if(!file)return;const r=new FileReader();r.onload=()=>{
-      const rows=parseCSV(String(r.result));
-      let hi=rows.findIndex(rw=>rw.some(c=>/date/i.test(c)));
-      const out=$("#iOut");
-      if(hi<0){out.innerHTML=`<p class="err">Couldn't find a "Date" column. Check this is the transactions CSV, not a PDF statement saved as CSV.</p>`;return;}
-      const h=rows[hi].map(x=>x.trim().toLowerCase());
-      const cDate=findCol(h,[/^date$/,/transaction date/,/date/]);
-      const cDesc=findCol(h,[/^name$/,/description/,/merchant/,/payee/,/details/,/narrative/,/memo/,/reference/,/counter ?party/]);
-      const cAmt=findCol(h,[/^amount$/,/amount/,/^value$/]);
-      const cOut=findCol(h,[/paid out/,/money out/,/debit/,/^out$/,/withdrawal/]);
-      const cIn=findCol(h,[/paid in/,/money in/,/credit/,/^in$/,/deposit/]);
-      const cCat=findCol(h,[/^category$/,/category/]);
-      if(cAmt<0&&cOut<0){out.innerHTML=`<p class="err">Couldn't find an amount column (looked for Amount, Paid out, Debit).</p>`;return;}
-      const existing=new Set(allTx(real).filter(t=>t.acct===acctId).map(t=>t.d+"|"+t.amt+"|"+t.note.toLowerCase()));
-      parsed=[];let skipped=0,dupes=0;
-      rows.slice(hi+1).forEach(rw=>{const d=parseDate(rw[cDate]);if(!d){skipped++;return;}
-        let v;if(cAmt>=0&&cOut<0)v=money(rw[cAmt]);else{const o=money(rw[cOut]),i=cIn>=0?money(rw[cIn]):NaN;v=(i>0?i:0)-(o>0?o:0);if(!(o>0)&&!(i>0)&&cAmt>=0)v=money(rw[cAmt]);}
-        if(!isFinite(v)||v===0){skipped++;return;}
-        const note=(cDesc>=0?rw[cDesc]:"").trim().replace(/\s{2,}/g," ").slice(0,80)||"Payment";
-        const amt=Math.abs(v);
-        const savingLike=/savings|save the change|pot|round ?up|isa/i.test(note);
-        const kind=v<0?(savingLike?"save":"spend"):(savingLike&&/from/i.test(note)?"spend":"income");
-        if(v>0&&savingLike){skipped++;return;}
-        const bankCat=cCat>=0?(rw[cCat]||"").toLowerCase():"";
-        let cat=kind==="spend"?guessCat(note):kind==="save"?"Savings":"Income";
-        if(kind==="spend"&&cat==="Other"&&bankCat){if(/groceries/.test(bankCat))cat="Groceries";else if(/eating|food|takeaway/.test(bankCat))cat="Eating out";else if(/transport|travel/.test(bankCat))cat="Transport";else if(/bills/.test(bankCat))cat="Bills";else if(/shopping/.test(bankCat))cat="Shopping";else if(/entertainment/.test(bankCat))cat="Fun";}
-        const key=d+"|"+amt+"|"+note.toLowerCase();if(existing.has(key)){dupes++;return;}existing.add(key);
-        const rec={id:uid(),d,amt,kind,acct:acctId,cat,note};
-        if(kind==="spend"){const nl=note.toLowerCase();const dm=(real.debts||[]).find(y=>y.match&&nl.includes(y.match.toLowerCase()));if(dm){rec.cat="Debt repayment";rec.debtId=dm.id;}}
-        parsed.push(rec);});
+    const out=$("#iOut");
+    const show=res=>{
+      if(res.error){out.innerHTML=`<p class="err">${esc(res.error)}</p>`;$("#iGo").disabled=true;return;}
+      const b=buildRecords(res.items,acctId);parsed=b.parsed;
+      const skipped=(res.skipped||0)+b.skipped;
       const sp=parsed.filter(x=>x.kind==="spend").reduce((s,x)=>s+x.amt,0);
-      out.innerHTML=parsed.length?`<p style="margin:0">Found <strong>${parsed.length}</strong> new payments (<span class="num">${gbp2(sp)}</span> spent)${dupes?`, ${dupes} already imported`:""}${skipped?`, ${skipped} rows skipped`:""}.</p>
-        <div class="preview"><table><tr><th>Date</th><th>Description</th><th>Amount</th><th>Type</th></tr>${parsed.slice(0,6).map(x=>`<tr><td>${x.d}</td><td>${esc(x.note)}</td><td class="num">${gbp2(x.amt)}</td><td>${x.kind==="spend"?esc(x.cat):x.kind==="save"?"Saved":"Money in"}</td></tr>`).join("")}</table></div>
-        <label class="small row" style="gap:6px"><input type="checkbox" id="iFlip"> Spending shows as positive numbers in this file (swap in/out)</label>`
-        :`<p class="err">No new payments found${dupes?` — all ${dupes} were already imported`:""}.</p>`;
+      const inn=parsed.filter(x=>x.kind==="income").reduce((s,x)=>s+x.amt,0);
+      out.innerHTML=parsed.length?`<p style="margin:0">Found <strong>${parsed.length}</strong> new payments: <span class="num">${gbp2(sp)}</span> out, <span class="num">${gbp2(inn)}</span> in${b.dupes?`. ${b.dupes} were already imported`:""}${skipped?`. ${skipped} lines skipped`:""}.</p>
+        <p class="small muted" style="margin:4px 0 0">Check the first few look right before importing.</p>
+        <div class="preview"><table><tr><th>Date</th><th>Description</th><th>Amount</th><th>Type</th></tr>${parsed.slice(0,8).map(x=>`<tr><td>${x.d}</td><td>${esc(x.note)}</td><td class="num">${x.kind==="income"?"+":"−"}${gbp2(x.amt).replace("−","")}</td><td>${x.kind==="spend"?esc(x.cat):x.kind==="save"?"Saved":"Money in"}</td></tr>`).join("")}</table></div>
+        <label class="small row" style="gap:6px;flex-wrap:nowrap"><input type="checkbox" id="iFlip"> Money in and out look the wrong way round (swap them)</label>`
+        :`<p class="err">No new payments found${b.dupes?`. All ${b.dupes} were already imported`:""}.</p>`;
       $("#iGo").disabled=!parsed.length;
-    };r.readAsText(file);});
+    };
+    $("#iFile").addEventListener("change",e=>{const file=e.target.files[0];if(!file)return;
+      const isPdf=/\.pdf$/i.test(file.name)||file.type==="application/pdf";
+      out.innerHTML=`<p class="muted small" style="margin:0">Reading ${isPdf?"PDF":"file"}…</p>`;$("#iGo").disabled=true;
+      const r=new FileReader();
+      r.onerror=()=>show({error:"Couldn't read that file."});
+      r.onload=async()=>{
+        try{show(isPdf?await pdfItems(new Uint8Array(r.result)):csvItems(String(r.result)));}
+        catch(err){show({error:isPdf?"Couldn't read this PDF. Check you're online the first time you import a PDF, then try again.":"Couldn't read that file."});}
+      };
+      if(isPdf)r.readAsArrayBuffer(file);else r.readAsText(file);
+    });
     $("#iGo").onclick=()=>{
       const flip=$("#iFlip")&&$("#iFlip").checked;
       const touched=new Set();
