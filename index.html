@@ -147,6 +147,7 @@ img{max-width:100%}[hidden]{display:none!important}
   </header>
   <nav class="tabs" role="tablist">
     <button role="tab" data-tab="overview" aria-selected="true" type="button">Overview</button>
+    <button role="tab" data-tab="goals" aria-selected="false" type="button">Goals</button>
     <button role="tab" data-tab="spending" aria-selected="false" type="button">Spending</button>
     <button role="tab" data-tab="subs" aria-selected="false" type="button">Subscriptions</button>
     <button role="tab" data-tab="debts" aria-selected="false" type="button">Debts</button>
@@ -199,7 +200,7 @@ const BANK_COLORS=["#5b3a9e","#e0533d","#1f8f8a","#d4a017","#3366cc","#c2185b","
 
 /* ---------- state ---------- */
 const defaultNotify=()=>({due:true,weekly:true,over:true,pay:true,daysBefore:3});
-const EMPTY=()=>({goal:1000,income:0,bills:0,payday:0,accounts:[],subs:[],debts:[],months:{},notify:defaultNotify(),lastOverWeek:""});
+const EMPTY=()=>({goal:1000,income:0,bills:0,payday:0,accounts:[],subs:[],debts:[],goals:[],months:{},notify:defaultNotify(),lastOverWeek:"",lastCheckin:""});
 let real=EMPTY();
 let demo=null;
 let usingDemo=false;
@@ -233,7 +234,7 @@ function initStore(){
   finishLoad();
 }
 function finishLoad(){
-  loaded=true;
+  loaded=true;setTimeout(maybeCheckin,600);
   const empty=!real.accounts.length&&!real.subs.length&&!(real.debts||[]).length&&!Object.keys(real.months).length;
   if(empty&&!usingDemo&&!demoDismissed){usingDemo=true;demo=makeDemo();}
   if(!empty&&usingDemo){usingDemo=false;demo=null;}
@@ -280,6 +281,11 @@ function makeDemo(){
 
 /* ---------- derived ---------- */
 function allTx(st){return Object.values(st.months).flat();}
+function goalSaved(st,g){return Math.round(((g.startSaved||0)+allTx(st).filter(x=>x.kind==="save"&&x.goalId===g.id).reduce((a,b)=>a+b.amt,0))*100)/100;}
+function activeGoals(st){return (st.goals||[]).filter(g=>goalSaved(st,g)<g.target-0.005);}
+function goalOf(st){const gs=activeGoals(st);return (st.goals||[]).length?Math.round(gs.reduce((a,g)=>a+(g.monthly||0),0)*100)/100:(st.goal||0);}
+function goalEta(st,g,monthly){const left=g.target-goalSaved(st,g);if(left<=0)return {n:0,label:"Reached"};const m=monthly??g.monthly;if(!(m>0))return {n:Infinity,label:"No monthly amount set"};const n=Math.ceil(left/m-1e-9);return {n,label:monthsFromNow(n)};}
+function monthsBetween(toIso){const t=today(),d=parseISO(toIso);return (d.getFullYear()-t.getFullYear())*12+(d.getMonth()-t.getMonth());}
 function acctById(st,id){return st.accounts.find(a=>a.id===id)||{name:"No bank",color:"#888"};}
 function subMonthly(x){return x.cycle==="weekly"?x.amount*WEEKS_PER_MONTH:x.cycle==="yearly"?x.amount/12:x.amount;}
 function addCycle(d,cycle,n){const x=new Date(d);if(cycle==="weekly")x.setDate(x.getDate()+7*n);else if(cycle==="yearly")x.setFullYear(x.getFullYear()+n);else{const day=x.getDate();x.setDate(1);x.setMonth(x.getMonth()+n);x.setDate(Math.min(day,daysInMonth(x)));}return x;}
@@ -299,7 +305,7 @@ function calc(st){
   const debtMonthly=activeDebts.reduce((a,b)=>a+Math.min(b.monthly||0,b.balance),0);
   const debtOwed=activeDebts.reduce((a,b)=>a+b.balance,0);
   const debtDue=activeDebts.filter(x=>x.start).map(x=>({x,d:nextDue({start:x.start,cycle:"monthly"},t)})).sort((a,b)=>a.d-b.d);
-  const flexMonthly=st.income-st.bills-subsMonthly-debtMonthly-st.goal;
+  const flexMonthly=st.income-st.bills-subsMonthly-debtMonthly-goalOf(st);
   const flexWeekly=flexMonthly/WEEKS_PER_MONTH;
   const ws=weekStart(t);
   const weeks=[];for(let i=7;i>=0;i--){const s=addDays(ws,-7*i),e=addDays(s,6);const inW=txs.filter(x=>x.kind==="spend"&&parseISO(x.d)>=s&&parseISO(x.d)<=e);weeks.push({s,e,total:inW.reduce((a,b)=>a+b.amt,0),flex:inW.filter(x=>!FIXED.has(x.cat)).reduce((a,b)=>a+b.amt,0)});}
@@ -362,14 +368,15 @@ function render(){
   else if(tab==="subs")v.innerHTML=viewSubs(st,c);
   else if(tab==="banks")v.innerHTML=viewBanks(st,c);
   else if(tab==="debts")v.innerHTML=viewDebts(st,c);
+  else if(tab==="goals")v.innerHTML=viewGoals(st,c);
   else v.innerHTML=viewPlan(st,c);
 }
 
 function statusFor(spent,budget){if(budget<=0)return["bad","No room left"];const r=spent/budget;if(r>1)return["bad","Over budget"];if(r>0.8)return["warn","Getting close"];return["good","On track"];}
 
 function viewOverview(st,c){
-  const pct=st.goal>0?Math.min(100,c.savedMonth/st.goal*100):0;
-  const need=Math.max(0,st.goal-c.savedMonth);
+  const pct=goalOf(st)>0?Math.min(100,c.savedMonth/goalOf(st)*100):0;
+  const need=Math.max(0,goalOf(st)-c.savedMonth);
   const weeksLeft=Math.max(1,c.daysLeft/7);
   const goalMsg=need<=0?`<span class="chip good">Goal reached</span> You've hit this month's target.`:
     `<strong class="num">${gbp(need)}</strong> still to put aside in the next ${c.daysLeft} day${c.daysLeft===1?"":"s"} — about <strong class="num">${gbp(need/weeksLeft)}</strong> a week.`;
@@ -383,9 +390,10 @@ function viewOverview(st,c){
   ${urgentDebt.map(u=>{const days=Math.round((u.d-c.t)/DAY);return `<div class="banner" style="border-color:var(--warn);background:var(--warn-soft)"><span><strong>${esc(u.x.name)}</strong> payment of <span class="num">${gbp2(Math.min(u.x.monthly,u.x.balance))}</span> is due ${days===0?"today":days===1?"tomorrow":"in "+days+" days"} from ${esc(acctById(st,u.x.acct).name)}. Make sure the money is there.</span><button class="btn sm" data-act="pay-debt" data-id="${esc(u.x.id)}" type="button">Record payment</button></div>`;}).join("")}
   <section class="goal" aria-label="Savings goal">
     <div class="row" style="justify-content:space-between"><span class="label">Saved this month</span><button class="btn sm ghost" data-tab-go="plan" type="button">Change goal</button></div>
-    <div class="big">${gbp(c.savedMonth)} <span class="muted" style="font-size:1rem;font-weight:500">of ${gbp(st.goal)}</span></div>
+    <div class="big">${gbp(c.savedMonth)} <span class="muted" style="font-size:1rem;font-weight:500">of ${gbp(goalOf(st))}</span></div>
     <div class="meter${need<=0?" good":""}" role="progressbar" aria-valuenow="${Math.round(pct)}" aria-valuemin="0" aria-valuemax="100"><i style="width:${pct}%"></i></div>
     <p style="margin:10px 0 0">${goalMsg}</p>
+    ${(st.goals||[]).length?`<div class="list" style="margin-top:10px">${(st.goals||[]).map(g=>{const sv=goalSaved(st,g),p=Math.min(100,sv/g.target*100);return `<div style="padding:6px 0"><div class="row" style="justify-content:space-between;gap:6px"><span style="font-weight:500;overflow-wrap:anywhere">${esc(g.name)}</span><span class="num small">${gbp(sv)} / ${gbp(g.target)}</span></div><div class="meter thin${p>=100?" good":""}" style="margin-top:4px"><i style="width:${p}%"></i></div></div>`;}).join("")}</div>`:`<p class="small muted" style="margin:8px 0 0">Saving for something specific? <button class="btn sm" data-tab-go="goals" type="button">Add a goal</button></p>`}
   </section>
 
   <section class="panel">
@@ -412,7 +420,7 @@ function viewOverview(st,c){
     ${(()=>{const orig=c.activeDebts.reduce((a,b)=>a+(b.original||b.balance),0);const p=orig?Math.min(100,(1-c.debtOwed/orig)*100):0;return `<div class="meter thin good"><i style="width:${p}%"></i></div><p class="small muted" style="margin:6px 0 0">${Math.round(p)}% paid off</p>`;})()}
   </section>`:""}
   <section class="panel">
-    <h2 style="margin-bottom:10px">Ways to find your ${gbp(st.goal)}</h2>
+    <h2 style="margin-bottom:10px">Ways to find your ${gbp(goalOf(st))}</h2>
     <ul class="tips">${tips(st,c).map(t=>`<li>${t}</li>`).join("")}</ul>
   </section>
   </div>`;
@@ -442,12 +450,12 @@ function tips(st,c){
   if(costly){const base=payoff(costly.balance,costly.monthly,costly.rate),more=payoff(costly.balance,costly.monthly+50,costly.rate);
     if(isFinite(base.n)&&isFinite(more.n)&&base.n>more.n) out.push(`${esc(costly.name)} costs ${costly.rate}% a year. Paying <strong class="num">£50</strong> extra a month clears it about <strong>${base.n-more.n} month${base.n-more.n===1?"":"s"} sooner</strong> and saves roughly <strong class="num">${gbp(base.interest-more.interest)}</strong> in interest. Record it as an extra payment and it counts toward your savings goal.`);}
   const fixed=st.bills+c.subsMonthly+c.debtMonthly;
-  if(!st.income){out.push(`Set your monthly income in <strong>Plan &amp; settings</strong> so the app can work out a weekly budget that still leaves ${gbp(st.goal)} to save.`);}
+  if(!st.income){out.push(`Set your monthly income in <strong>Plan &amp; settings</strong> so the app can work out a weekly budget that still leaves ${gbp(goalOf(st))} to save.`);}
   else if(c.flexMonthly<0){
     const most=Math.max(0,st.income-fixed-c.weeks.slice(0,7).reduce((a,b)=>a+b.flex,0)/7*WEEKS_PER_MONTH);
-    out.push(`With <span class="num">${gbp(st.income)}</span> coming in and <span class="num">${gbp(fixed)}</span> of bills, subscriptions and debt payments, a ${gbp(st.goal)} goal leaves nothing for food and travel. At your recent spending, about <strong class="num">${gbp(most)}</strong> a month is realistic. Start there and raise it as income grows.`);
+    out.push(`With <span class="num">${gbp(st.income)}</span> coming in and <span class="num">${gbp(fixed)}</span> of bills, subscriptions and debt payments, a ${gbp(goalOf(st))} goal leaves nothing for food and travel. At your recent spending, about <strong class="num">${gbp(most)}</strong> a month is realistic. Start there and raise it as income grows.`);
   } else {
-    out.push(`Move <strong class="num">${gbp(st.goal)}</strong> to a separate savings pot on the day your money comes in, then live on the <span class="num">${gbp(c.flexWeekly)}</span> a week that's left.`);
+    out.push(`Move <strong class="num">${gbp(goalOf(st))}</strong> to a separate savings pot on the day your money comes in, then live on the <span class="num">${gbp(c.flexWeekly)}</span> a week that's left.`);
   }
   const subs=c.activeSubs.slice().sort((a,b)=>subMonthly(b)-subMonthly(a));
   if(subs.length>=2){const two=subs.slice(0,2);out.push(`Your ${c.activeSubs.length} subscriptions cost <span class="num">${gbp2(c.subsMonthly)}</span> a month (<span class="num">${gbp(c.subsMonthly*12)}</span> a year). Cancelling ${esc(two[0].name)} and ${esc(two[1].name)} would free <strong class="num">${gbp2(subMonthly(two[0])+subMonthly(two[1]))}</strong> a month.`);}
@@ -502,6 +510,139 @@ function viewDebts(st,c){
   ${cleared.length?`<section class="panel"><h2 style="margin-bottom:6px">Cleared</h2><div class="list">${cleared.map(x=>`<div class="item"><span class="dot" style="background:var(--good)"></span><div class="main"><div class="name">${esc(x.name)}</div><div class="small muted">Paid off ${gbp(x.original||0)}</div></div><div><button class="btn sm ghost" data-act="edit-debt" data-id="${esc(x.id)}" type="button">Edit</button></div></div>`).join("")}</div></section>`:""}
   <p class="small muted" style="margin:0">Clear-by dates and interest are estimates from the balance, monthly payment and APR you entered. Your lender's statement has the exact figures. Imported payments are linked to a debt when their description contains the debt's "shows on statement as" word.</p>
   </div>`;
+}
+function viewGoals(st,c){
+  const goals=st.goals||[];
+  const total=goals.reduce((a,g)=>a+g.target,0),saved=goals.reduce((a,g)=>a+Math.min(g.target,goalSaved(st,g)),0);
+  const pd=st.payday;
+  const card=g=>{const sv=goalSaved(st,g),p=Math.min(100,sv/g.target*100),done=sv>=g.target-0.005,eta=goalEta(st,g);
+    let byLine="";
+    if(g.by&&!done){const months=Math.max(1,monthsBetween(g.by));const need=(g.target-sv)/months;byLine=`<p class="small" style="margin:4px 0 0">To finish by <strong>${parseISO(g.by).toLocaleDateString("en-GB",{month:"short",year:"numeric"})}</strong> you need <span class="num">${gbp(need)}</span> a month${need>g.monthly+0.5?` <span class="chip warn">£${Math.ceil(need-g.monthly)} more than planned</span>`:` <span class="chip good">On track</span>`}</p>`;}
+    return `<div class="panel" style="padding:14px">
+      <div class="row" style="justify-content:space-between;align-items:flex-start"><strong style="overflow-wrap:anywhere;min-width:0">${esc(g.name)}</strong>${done?`<span class="chip good">Reached</span>`:`<span class="chip plain">${gbp(g.monthly)}/month</span>`}</div>
+      <div class="row" style="align-items:baseline;gap:6px;margin-top:8px"><span class="num" style="font-size:1.35rem;font-family:var(--f-display);font-weight:700">${gbp2(sv)}</span><span class="muted small">of ${gbp(g.target)} · ${Math.round(p)}%</span></div>
+      <div class="meter thin${done?" good":""}"><i style="width:${p}%"></i></div>
+      ${done?"":`<p class="small" style="margin:8px 0 0">${gbp(g.target-sv)} to go · ${isFinite(eta.n)?`at ${gbp(g.monthly)} a month you'll get there by about <strong>${eta.label}</strong>`:eta.label}</p>`}
+      ${byLine}
+      <div class="row" style="margin-top:10px"><button class="btn sm primary" data-act="save-goal" data-id="${esc(g.id)}" type="button">Add money</button><button class="btn sm ghost" data-act="edit-goal" data-id="${esc(g.id)}" type="button">Edit</button></div>
+    </div>`;};
+  return `<div class="stack">
+  ${goals.length?`<div class="plan">
+    <div><div class="label">Goals</div><div class="v">${goals.length}</div></div>
+    <div><div class="label">Saved</div><div class="v">${gbp(saved)}</div></div>
+    <div><div class="label">Target</div><div class="v">${gbp(total)}</div></div>
+    <div><div class="label">Per month</div><div class="v">${gbp(goalOf(st))}</div></div>
+  </div>`:""}
+  <div class="row" style="justify-content:space-between"><h2>Savings goals</h2><span class="row">${goals.length?`<button class="btn sm" data-act="checkin" type="button">Payday check-in</button>`:""}<button class="btn sm primary" data-act="add-goal" type="button">Add goal</button></span></div>
+  ${goals.length?goals.map(card).join(""):`<div class="panel empty">Add what you're saving for, like an emergency fund, a trip or a new laptop. You'll set the amount and how much to put aside each month.</div>`}
+  <div class="panel small">${pd?`Payday is set to the <strong>${pd}${["th","st","nd","rd"][(pd%100>10&&pd%100<14)?0:(pd%10<4?pd%10:0)]}</strong> of each month. On payday the app opens a check-in asking how much to put toward each goal.`:`Set your payday in <button class="btn sm" data-tab-go="plan" type="button">Plan &amp; settings</button> and the app will check in with you every payday.`}</div>
+  </div>`;
+}
+function goalSheet(existing){
+  ensureReal();
+  const g=existing||{name:"",target:"",startSaved:"",monthly:"",by:""};
+  openSheet(`<form id="goalForm" novalidate>
+   <h2 style="margin-bottom:12px">${existing?"Edit goal":"New savings goal"}</h2>
+   <div class="field"><label for="gName">What are you saving for?</label><input id="gName" value="${esc(g.name)}" placeholder="e.g. Emergency fund, holiday, new laptop"></div>
+   <div class="two"><div class="field"><label for="gTarget">Goal amount (£)</label><input id="gTarget" inputmode="decimal" value="${g.target}"></div>
+   <div class="field"><label for="gStart">Already saved (£)</label><input id="gStart" inputmode="decimal" value="${g.startSaved||""}" placeholder="0"></div></div>
+   <div class="field"><label for="gBy">Finish by (optional)</label><input id="gBy" type="date" value="${g.by||""}"></div>
+   <div class="field" style="background:var(--accent-soft);border-radius:10px;padding:12px"><label for="gMonthly"><strong>How much do you want to save each month for this?</strong></label><input id="gMonthly" inputmode="decimal" value="${g.monthly}" placeholder="e.g. 200"><span class="small" id="gHint" style="margin-top:4px"></span></div>
+   <div class="err" id="gErr"></div>
+   <div class="row" style="justify-content:space-between"><span>${existing?`<button class="btn danger ghost" type="button" id="gDel">Delete</button>`:""}</span><span class="row"><button class="btn" type="button" id="gCancel">Cancel</button><button class="btn primary" type="submit">${existing?"Save":"Add goal"}</button></span></div>
+  </form>`,()=>{
+    $("#gCancel").onclick=closeSheet;
+    const hint=()=>{const target=money($("#gTarget").value),start=money($("#gStart").value)||0,m=money($("#gMonthly").value),by=$("#gBy").value;const left=target-start-(existing?goalSaved(real,existing)-(existing.startSaved||0):0);
+      let h="";
+      if(!(target>0)){$("#gHint").innerHTML="";return;}
+      if(left<=0){$("#gHint").innerHTML="You've already saved enough for this.";return;}
+      if(m>0){const n=Math.ceil(left/m-1e-9);h=`At ${gbp(m)} a month you'll reach ${gbp(target)} by about <strong>${monthsFromNow(n)}</strong> (${n} month${n===1?"":"s"}).`;}
+      if(by){const months=Math.max(1,monthsBetween(by));const need=Math.ceil(left/months);h+=`${h?" ":""}To finish by ${parseISO(by).toLocaleDateString("en-GB",{month:"short",year:"numeric"})} you'd need <strong>${gbp(need)}</strong> a month. <button class="btn sm" type="button" id="gUse">Use ${gbp(need)}</button>`;}
+      if(!h)h="Type a monthly amount to see when you'll reach it.";
+      $("#gHint").innerHTML=h;const u=$("#gUse");if(u)u.onclick=()=>{$("#gMonthly").value=Math.ceil(left/Math.max(1,monthsBetween(by)));hint();};};
+    ["gTarget","gStart","gMonthly","gBy"].forEach(id=>$("#"+id).addEventListener("input",hint));hint();
+    if(existing){const del=$("#gDel");del.onclick=()=>{if(del.dataset.armed){real.goals=real.goals.filter(x=>x.id!==existing.id);saveAll();closeSheet();render();toast("Goal deleted. Money already logged stays in your savings history.");}else{del.dataset.armed="1";del.textContent="Tap again to delete";}};}
+    $("#goalForm").addEventListener("submit",e=>{e.preventDefault();
+      const name=$("#gName").value.trim(),target=money($("#gTarget").value),start=money($("#gStart").value),monthly=money($("#gMonthly").value),by=$("#gBy").value;
+      if(!name){$("#gErr").textContent="Give the goal a name.";return;}
+      if(!(target>0)){$("#gErr").textContent="Enter the amount you want to reach.";return;}
+      if(!(monthly>0)){$("#gErr").textContent="Enter how much you'll save each month for it.";return;}
+      const rec={id:existing?existing.id:uid(),name,target,startSaved:start>0?start:0,monthly,by:by||"",created:existing?existing.created:iso(today())};
+      if(existing)real.goals=real.goals.map(x=>x.id===rec.id?rec:x);else (real.goals=real.goals||[]).push(rec);
+      saveAll();closeSheet();render();toast(existing?"Goal saved":"Goal added");});
+  });
+}
+function addToGoalSheet(g){
+  ensureReal();const st=real;
+  if(!st.accounts.length){bankSheet(null,()=>addToGoalSheet(g));toast("Add a bank first");return;}
+  openSheet(`<form id="agForm" novalidate>
+   <h2 style="margin-bottom:4px">Add money to ${esc(g.name)}</h2>
+   <p class="small muted" style="margin:0 0 12px">${gbp2(goalSaved(st,g))} of ${gbp(g.target)} saved</p>
+   <div class="two"><div class="field"><label for="agAmt">Amount (£)</label><input id="agAmt" inputmode="decimal" value="${g.monthly}"></div>
+   <div class="field"><label for="agDate">Date</label><input id="agDate" type="date" value="${iso(today())}"></div></div>
+   <div class="field"><label for="agAcct">Moved from</label><select id="agAcct">${acctOptions(st,st.accounts[0].id)}</select></div>
+   <div class="err" id="agErr"></div>
+   <div class="row" style="justify-content:flex-end"><button class="btn" type="button" id="agCancel">Cancel</button><button class="btn primary" type="submit">Add</button></div>
+  </form>`,()=>{
+    $("#agCancel").onclick=closeSheet;
+    $("#agForm").addEventListener("submit",e=>{e.preventDefault();const amt=money($("#agAmt").value),d=$("#agDate").value;
+      if(!(amt>0)){$("#agErr").textContent="Enter an amount above £0.";return;}
+      if(!d){$("#agErr").textContent="Pick a date.";return;}
+      logGoalSaving(g,amt,d,$("#agAcct").value);closeSheet();render();});
+  });
+}
+function logGoalSaving(g,amt,d,acct){
+  const before=goalSaved(real,g);
+  const tx={id:uid(),d,amt,kind:"save",acct,cat:"Savings",note:"Saved for "+g.name,goalId:g.id};
+  const k=d.slice(0,7);(real.months[k]=real.months[k]||[]).push(tx);saveAll();
+  const after=goalSaved(real,g);
+  toast(before<g.target&&after>=g.target?`${g.name}: goal reached!`:`Added to ${g.name}`);
+}
+let checkinShownThisSession=false;
+function checkinDue(){
+  if(usingDemo||!real.payday||!activeGoals(real).length)return false;
+  const t=today();const pd=Math.min(real.payday,daysInMonth(t));
+  return t.getDate()>=pd&&real.lastCheckin!==monthKey(t);
+}
+function maybeCheckin(){if(checkinShownThisSession||$("#sheetRoot").innerHTML||!checkinDue())return;checkinShownThisSession=true;checkinSheet(true);}
+function checkinSheet(auto){
+  ensureReal();const st=real;
+  if(!st.accounts.length){bankSheet(null,()=>checkinSheet(auto));toast("Add a bank first");return;}
+  const gs=activeGoals(st);
+  if(!gs.length){toast("No goals in progress. Add one first.");return;}
+  const t=today();
+  openSheet(`<form id="ciForm" novalidate>
+   <p class="label" style="margin:0 0 2px">${auto?"Payday":"Check-in"} · ${t.toLocaleDateString("en-GB",{month:"long"})}</p>
+   <h2 style="margin-bottom:6px">Here's how your goals are going</h2>
+   <p class="small muted" style="margin:0 0 12px">How much do you want to put aside this month for each one? Move the money in your banking app, then save it here.</p>
+   ${gs.map(g=>{const sv=goalSaved(st,g),p=Math.min(100,sv/g.target*100),eta=goalEta(st,g);return `<div style="padding:10px 0;border-top:1px solid var(--line)">
+     <div class="row" style="justify-content:space-between"><strong style="overflow-wrap:anywhere;min-width:0">${esc(g.name)}</strong><span class="num small">${gbp(sv)} / ${gbp(g.target)}</span></div>
+     <div class="meter thin"><i style="width:${p}%"></i></div>
+     <p class="small muted" style="margin:6px 0">${Math.round(p)}% there · ${isFinite(eta.n)?`done by about ${eta.label} at ${gbp(g.monthly)}/month`:eta.label}</p>
+     <div class="field" style="margin:0"><label for="ci_${esc(g.id)}">Save this month (£)</label><input id="ci_${esc(g.id)}" data-goal="${esc(g.id)}" inputmode="decimal" value="${g.monthly}"></div>
+   </div>`;}).join("")}
+   <div class="field" style="margin-top:10px"><label for="ciAcct">Moving it from</label><select id="ciAcct">${acctOptions(st,st.accounts[0].id)}</select></div>
+   <label class="row small" style="gap:8px;flex-wrap:nowrap;align-items:flex-start;margin-bottom:10px"><input type="checkbox" id="ciKeep" style="margin-top:3px"><span>Make these my monthly amounts from now on</span></label>
+   <p style="margin:0 0 10px">Total: <strong class="num" id="ciTotal"></strong></p>
+   <div class="err" id="ciErr"></div>
+   <div class="row" style="justify-content:space-between"><button class="btn ghost" type="button" id="ciSkip">Skip this month</button><span class="row"><button class="btn" type="button" id="ciLater">Later</button><button class="btn primary" type="submit">Save</button></span></div>
+  </form>`,()=>{
+    const inputs=[...document.querySelectorAll("#ciForm input[data-goal]")];
+    const tot=()=>{$("#ciTotal").textContent=gbp2(inputs.reduce((a,i)=>a+(money(i.value)>0?money(i.value):0),0));};
+    inputs.forEach(i=>i.addEventListener("input",tot));tot();
+    $("#ciLater").onclick=closeSheet;
+    $("#ciSkip").onclick=()=>{real.lastCheckin=monthKey(today());saveAll();closeSheet();toast("Skipped this month");};
+    $("#ciForm").addEventListener("submit",e=>{e.preventDefault();
+      const acct=$("#ciAcct").value,keep=$("#ciKeep").checked,d=iso(today());let n=0;
+      for(const i of inputs){const v=money(i.value);if(i.value.trim()&&!(v>=0)){$("#ciErr").textContent="Amounts must be numbers, like 150.";return;}}
+      inputs.forEach(i=>{const v=money(i.value);const g=real.goals.find(x=>x.id===i.dataset.goal);if(!g)return;
+        if(keep&&v>0)g.monthly=v;
+        if(v>0){const tx={id:uid(),d,amt:v,kind:"save",acct,cat:"Savings",note:"Saved for "+g.name,goalId:g.id};const k=d.slice(0,7);(real.months[k]=real.months[k]||[]).push(tx);n++;}});
+      real.lastCheckin=monthKey(today());saveAll();closeSheet();render();
+      const reached=real.goals.filter(g=>goalSaved(real,g)>=g.target-0.005).map(g=>g.name);
+      toast(n?`Saved to ${n} goal${n===1?"":"s"}`:"Nothing saved this month");
+      if(reached.length)setTimeout(()=>toast(`Goal reached: ${reached[reached.length-1]}`),2600);});
+  });
 }
 function viewSubs(st,c){
   const act=c.upcoming;
@@ -575,7 +716,7 @@ function viewPlan(st,c){
     <h2 style="margin-bottom:10px">Your monthly numbers</h2>
     <div class="two">
       <div class="field"><label for="pIncome">Money in per month (£)</label><input id="pIncome" inputmode="decimal" value="${st.income||""}" placeholder="e.g. 1400"></div>
-      <div class="field"><label for="pGoal">Savings goal per month (£)</label><input id="pGoal" inputmode="decimal" value="${st.goal||""}"></div>
+      <div class="field"><label for="pGoal">Savings goal per month (£)</label><input id="pGoal" inputmode="decimal" value="${(st.goals||[]).length?goalOf(st):(st.goal||"")}"${(st.goals||[]).length?" readonly":""}>${(st.goals||[]).length?`<span class="small muted">Set by your goals. Change it on the Goals tab.</span>`:""}</div>
     </div>
     <div class="field"><label for="pBills">Rent and bills per month (£)</label><input id="pBills" inputmode="decimal" value="${st.bills||""}" placeholder="rent, phone, energy, council tax…"></div>
     <p class="small muted" style="margin:0">Count wages, Universal Credit, and any other regular money. Subscriptions are added automatically from the Subscriptions tab.</p>
@@ -585,10 +726,10 @@ function viewPlan(st,c){
     <div><div class="label">− Rent &amp; bills</div><div class="v">${gbp(st.bills)}</div></div>
     <div><div class="label">− Subscriptions</div><div class="v">${gbp(c.subsMonthly)}</div></div>
     <div><div class="label">− Debt payments</div><div class="v">${gbp(c.debtMonthly)}</div></div>
-    <div><div class="label">− Savings</div><div class="v">${gbp(st.goal)}</div></div>
+    <div><div class="label">− Savings</div><div class="v">${gbp(goalOf(st))}</div></div>
     <div class="result"><div class="label">= Day-to-day</div><div class="v">${gbp(flex)}/mo<br><span class="small">${gbp(flex/WEEKS_PER_MONTH)}/wk</span></div></div>
   </div>
-  ${st.income&&flex<0?`<div class="panel" style="border-color:var(--bad)"><strong>The goal is bigger than what's left.</strong> After rent, bills, subscriptions and debt payments you have <span class="num">${gbp(st.income-fixed)}</span> a month. To save ${gbp(st.goal)} you'd need about <span class="num">${gbp(-flex)}</span> more coming in, or that much less going out. You can lower the goal for now and build up.</div>`:""}
+  ${st.income&&flex<0?`<div class="panel" style="border-color:var(--bad)"><strong>The goal is bigger than what's left.</strong> After rent, bills, subscriptions and debt payments you have <span class="num">${gbp(st.income-fixed)}</span> a month. To save ${gbp(goalOf(st))} you'd need about <span class="num">${gbp(-flex)}</span> more coming in, or that much less going out. You can lower the goal for now and build up.</div>`:""}
   <section class="panel"><h2 style="margin-bottom:8px">Savings this year</h2>${yearSaved(st,c)}</section>
   ${notifyPanel(st)}
   <section class="panel">
@@ -615,7 +756,7 @@ function notifyPanel(st){
     ${t("nOver",n.over,"Over budget","As soon as this week's day-to-day spending goes over budget.")}
     ${t("nDue",n.due,"Payments due","Debts and subscriptions, "+n.daysBefore+" days before and on the day.")}
     ${t("nWeekly",n.weekly,"Sunday summary","What you spent this week against your budget.")}
-    ${t("nPay",n.pay,"Payday savings","A reminder to move money to savings when your income arrives.")}
+    ${t("nPay",n.pay,"Payday goal check-in","On payday: how far you've got with each goal, and how much to put aside this month.")}
     <div class="field" style="margin-top:10px"><label for="pPayday">Day of the month your money comes in</label><input id="pPayday" inputmode="numeric" value="${st.payday||""}" placeholder="e.g. 15"></div>
     <p class="small muted" style="margin:0">Over-budget alerts work now. Payment, Sunday and payday reminders start once the reminder server is connected.</p>
   </section>`;
@@ -658,7 +799,7 @@ function restoreBackup(file){
 function yearSaved(st,c){
   const y=c.t.getFullYear();let total=0;const rows=[];
   for(let m=0;m<=c.t.getMonth();m++){const k=y+"-"+pad(m+1);const v=(st.months[k]||[]).filter(x=>x.kind==="save").reduce((a,b)=>a+b.amt,0);total+=v;rows.push([k,v]);}
-  return rows.reverse().map(([k,v])=>{const p=st.goal?Math.min(100,v/st.goal*100):0;return `<div class="catbar"><span>${parseISO(k+"-01").toLocaleDateString("en-GB",{month:"short"})}</span><span class="track"><i style="width:${p}%;background:${v>=st.goal?"var(--good)":"var(--bar-now)"}"></i></span><span class="num">${gbp(v)}</span></div>`;}).join("")+`<p class="small muted" style="margin:8px 0 0">Total saved in ${y}: <strong class="num">${gbp2(total)}</strong></p>`;
+  return rows.reverse().map(([k,v])=>{const p=goalOf(st)?Math.min(100,v/goalOf(st)*100):0;return `<div class="catbar"><span>${parseISO(k+"-01").toLocaleDateString("en-GB",{month:"short"})}</span><span class="track"><i style="width:${p}%;background:${v>=goalOf(st)?"var(--good)":"var(--bar-now)"}"></i></span><span class="num">${gbp(v)}</span></div>`;}).join("")+`<p class="small muted" style="margin:8px 0 0">Total saved in ${y}: <strong class="num">${gbp2(total)}</strong></p>`;
 }
 
 /* ---------- sheets (forms) ---------- */
@@ -691,11 +832,12 @@ function txSheet(existing,kindDefault){
    <div class="field"><label for="tNote">Where / what</label><input id="tNote" value="${esc(x.note)}" placeholder="e.g. Tesco, TfL, moved to savings"></div>
    <div class="two"><div class="field"><label for="tAcct">Bank</label><select id="tAcct">${acctOptions(st,x.acct)}</select></div>
    <div class="field" id="catField"><label for="tCat">Category</label><select id="tCat">${CATS.map(k=>`<option${k===x.cat?" selected":""}>${k}</option>`).join("")}</select></div></div>
+   ${(st.goals||[]).length?`<div class="field" id="goalField"><label for="tGoal">For which goal?</label><select id="tGoal"><option value="">General savings</option>${st.goals.map(g=>`<option value="${esc(g.id)}"${g.id===x.goalId?" selected":""}>${esc(g.name)}</option>`).join("")}</select></div>`:""}
    <div class="err" id="tErr"></div>
    <div class="row" style="justify-content:space-between"><span>${existing?`<button class="btn danger ghost" type="button" id="tDel">Delete</button>`:""}</span><span class="row"><button class="btn" type="button" id="tCancel">Cancel</button><button class="btn primary" type="submit">${existing?"Save":"Add"}</button></span></div>
   </form>`,()=>{
     bindSeg();
-    const sync=()=>{$("#catField").hidden=segVal("kind")!=="spend";};sync();
+    const sync=()=>{$("#catField").hidden=segVal("kind")!=="spend";const gf=$("#goalField");if(gf)gf.hidden=segVal("kind")!=="save";};sync();
     $('#sheetRoot .seg[data-seg="kind"]').addEventListener("change",sync);
     $("#tNote").addEventListener("blur",()=>{if(!existing&&segVal("kind")==="spend"){const g=guessCat($("#tNote").value);if(g!=="Other")$("#tCat").value=g;}});
     $("#tCancel").onclick=closeSheet;
@@ -705,6 +847,7 @@ function txSheet(existing,kindDefault){
       if(!(amt>0)){$("#tErr").textContent="Enter an amount above £0, like 12.50.";return;}
       if(!d){$("#tErr").textContent="Pick a date.";return;}
       const tx={id:existing?existing.id:uid(),d,amt,kind,acct:$("#tAcct").value,cat:kind==="spend"?$("#tCat").value:kind==="save"?"Savings":"Income",note:$("#tNote").value.trim()||(kind==="save"?"Saved":kind==="income"?"Money in":$("#tCat").value)};
+      if(kind==="save"&&$("#tGoal")&&$("#tGoal").value)tx.goalId=$("#tGoal").value;
       if(existing)removeTx(existing,true);
       if(existing&&existing.debtId){tx.debtId=existing.debtId;tx.kind=existing.kind;tx.cat=existing.cat;const dd=(real.debts||[]).find(y=>y.id===tx.debtId);if(dd){dd.balance=Math.max(0,Math.round((dd.balance-amt)*100)/100);persistSettings();}}
       const k=d.slice(0,7);(real.months[k]=real.months[k]||[]).push(tx);persistMonth(k);
@@ -1025,7 +1168,7 @@ document.addEventListener("click",e=>{
   const g=e.target.closest("[data-tab-go]");if(g){tab=g.dataset.tabGo;render();window.scrollTo({top:0});return;}
   const b=e.target.closest("[data-act]");if(!b||b.closest("#sheetRoot"))return;
   const act=b.dataset.act,id=b.dataset.id;
-  if(usingDemo&&/^(edit-|adopt-|import|pay-)/.test(act)){toast("This is example data. Tap “Start with my own” to begin.");return;}
+  if(usingDemo&&/^(edit-|adopt-|import|pay-|save-goal|checkin)/.test(act)){toast("This is example data. Tap “Start with my own” to begin.");return;}
   if(act==="start-real"){leaveDemo();render();bankSheet(null);}
   else if(act==="add-sub")subSheet(null);
   else if(act==="edit-sub"){ensureReal();const s=real.subs.find(x=>x.id===id);if(s)subSheet(s);}
@@ -1036,6 +1179,10 @@ document.addEventListener("click",e=>{
   else if(act==="enable-notify"){Notification.requestPermission().then(p=>{render();if(p==="granted")notify("Notifications are on","You'll get alerts from Abdu's Fintracker here.","welcome");});}
   else if(act==="test-notify"){notify("Test from Fintracker","Notifications are working.","test").then(ok=>{if(!ok)toast("Couldn't show a notification.");});}
   else if(act==="add-debt")debtSheet(null);
+  else if(act==="add-goal")goalSheet(null);
+  else if(act==="edit-goal"){ensureReal();const g=(real.goals||[]).find(x=>x.id===id);if(g)goalSheet(g);}
+  else if(act==="save-goal"){ensureReal();const g=(real.goals||[]).find(x=>x.id===id);if(g)addToGoalSheet(g);}
+  else if(act==="checkin")checkinSheet(false);
   else if(act==="edit-debt"){ensureReal();const d=(real.debts||[]).find(x=>x.id===id);if(d)debtSheet(d);}
   else if(act==="pay-debt"){ensureReal();const d=(real.debts||[]).find(x=>x.id===id);if(d)payDebtSheet(d);}
   else if(act==="edit-bank"){ensureReal();const a=real.accounts.find(x=>x.id===id);if(a)bankSheet(a);}
@@ -1047,7 +1194,7 @@ document.addEventListener("change",e=>{
   else if(e.target.id==="fAcct"){txFilter.acct=e.target.value;render();}
   else if(e.target.id==="rFile"){const f=e.target.files[0];e.target.value="";if(f)restoreBackup(f);}
   else if(["nOver","nDue","nWeekly","nPay"].includes(e.target.id)){ensureReal();const k={nOver:"over",nDue:"due",nWeekly:"weekly",nPay:"pay"}[e.target.id];real.notify=Object.assign(defaultNotify(),real.notify||{});real.notify[k]=e.target.checked;saveAll();}
-  else if(e.target.id==="pPayday"){ensureReal();const v=parseInt(e.target.value,10);real.payday=v>=1&&v<=31?v:0;saveAll();render();toast(real.payday?"Payday saved":"Payday cleared");}
+  else if(e.target.id==="pPayday"){ensureReal();const v=parseInt(e.target.value,10);real.payday=v>=1&&v<=31?v:0;saveAll();render();toast(real.payday?"Payday saved":"Payday cleared");setTimeout(maybeCheckin,800);}
   else if(["pIncome","pGoal","pBills"].includes(e.target.id)){
     ensureReal();const v=money(e.target.value);const n=isFinite(v)&&v>=0?v:0;
     if(e.target.id==="pIncome")real.income=n;else if(e.target.id==="pGoal")real.goal=n;else real.bills=n;
@@ -1061,7 +1208,7 @@ if("serviceWorker" in navigator){
   window.addEventListener("load",()=>{navigator.serviceWorker.register("sw.js",{updateViaCache:"none"}).then(r=>{swReg=r;}).catch(()=>{});});
   navigator.serviceWorker.addEventListener("controllerchange",()=>{if(reloading||$("#sheetRoot").innerHTML)return;reloading=true;location.reload();});
 }
-document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible"){render();if(swReg)swReg.update().catch(()=>{});}});
+document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible"){render();setTimeout(maybeCheckin,400);if(swReg)swReg.update().catch(()=>{});}});
 })();
 </script>
 </body>

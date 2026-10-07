@@ -1,5 +1,5 @@
 /* Abdu's Fintracker service worker: offline cache + notifications */
-const VERSION = "fintracker-v4";
+const VERSION = "fintracker-v5";
 const FILES = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png", "./apple-touch-icon.png"];
 
 self.addEventListener("install", (e) => {
@@ -39,6 +39,21 @@ async function readState() {
 }
 const gbp = (n) => "£" + (Math.round(n * 100) / 100).toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const FIXED = new Set(["Subscriptions", "Bills", "Debt repayment"]);
+function goalSaved(st, g) {
+  return (g.startSaved || 0) + Object.values(st.months || {}).flat().filter((x) => x.kind === "save" && x.goalId === g.id).reduce((a, b) => a + b.amt, 0);
+}
+function monthlyGoal(st) {
+  const gs = st.goals || [];
+  if (!gs.length) return st.goal || 0;
+  return gs.filter((g) => goalSaved(st, g) < g.target).reduce((a, g) => a + (g.monthly || 0), 0);
+}
+function paydaySummary(st) {
+  const gs = (st && st.goals || []).filter((g) => goalSaved(st, g) < g.target);
+  if (!gs.length) return null;
+  const parts = gs.slice(0, 3).map((g) => `${g.name} ${Math.round(goalSaved(st, g) / g.target * 100)}%`);
+  const monthly = gs.reduce((a, g) => a + (g.monthly || 0), 0);
+  return `${parts.join(" · ")}. Plan for this month: ${gbp(monthly)}. Tap to choose how much to put aside.`;
+}
 function weeklySummary(st) {
   if (!st) return null;
   const now = new Date(); const t = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -50,7 +65,7 @@ function weeklySummary(st) {
   const subs = (st.subs || []).filter((x) => x.active !== false)
     .reduce((a, x) => a + (x.cycle === "weekly" ? x.amount * 52 / 12 : x.cycle === "yearly" ? x.amount / 12 : x.amount), 0);
   const debts = (st.debts || []).filter((x) => x.balance > 0).reduce((a, x) => a + Math.min(x.monthly || 0, x.balance), 0);
-  const budget = ((st.income || 0) - (st.bills || 0) - subs - debts - (st.goal || 0)) / (52 / 12);
+  const budget = ((st.income || 0) - (st.bills || 0) - subs - debts - monthlyGoal(st)) / (52 / 12);
   let body = `You spent ${gbp(flex)} on day-to-day things this week`;
   if (budget > 0) body += flex > budget ? `, ${gbp(flex - budget)} over your ${gbp(budget)} budget.` : `, ${gbp(budget - flex)} under your ${gbp(budget)} budget. Nice.`;
   else body += ".";
@@ -66,6 +81,10 @@ self.addEventListener("push", (e) => {
     try { p = e.data ? e.data.json() : {}; } catch (err) { p = { body: e.data ? e.data.text() : "" }; }
     let title = p.title || "Abdu's Fintracker";
     let body = p.body || "Open the app to check your money.";
+    if (p.type === "payday") {
+      title = "Payday: how your goals are going";
+      body = paydaySummary(await readState()) || "Payday! Open the app to put some money aside.";
+    }
     if (p.type === "weekly") {
       title = "Your week in money";
       body = weeklySummary(await readState()) || body;
