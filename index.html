@@ -225,10 +225,26 @@ async function mirrorForReminders(){
   try{if(!("caches" in window))return;const c=await caches.open("fintracker-state");
     await c.put("./__state.json",new Response(JSON.stringify(real),{headers:{"content-type":"application/json"}}));}catch(e){}
 }
+function fixMisreadIncome(){
+  if((real.fixIncomeV||0)>=1)return;
+  let n=0;
+  Object.values(real.months||{}).forEach(arr=>arr.forEach(x=>{
+    const rawNote=x.note||"";
+    if(x.kind==="spend"&&(/(^|[\s.])(FPI|BGC)(?=[\s.]|$)/.test(rawNote)||/student loans company|salary|wages|payroll|universal credit|\bdwp\b/i.test(rawNote))){
+      if(x.debtId){const dd=(real.debts||[]).find(y=>y.id===x.debtId);if(dd)dd.balance=Math.round((dd.balance+x.amt)*100)/100;delete x.debtId;}
+      x.kind="income";x.cat="Income";n++;
+    }
+    const c=cleanNote(rawNote);if(c)x.note=c;
+  }));
+  real.fixIncomeV=1;
+  try{localStorage.setItem(LS_KEY,JSON.stringify(real));}catch(e){}
+  if(n)setTimeout(()=>toast(`Fixed ${n} payment${n===1?"":"s"} that were money in, not out`),900);
+}
 function initStore(){
   storeMode="local";
   const d=lsLoad(); if(d) real=Object.assign(EMPTY(),d);
   real.debts=real.debts||[]; real.notify=Object.assign(defaultNotify(),real.notify||{});
+  fixMisreadIncome();
   try{if(navigator.storage&&navigator.storage.persist)navigator.storage.persist();}catch(e){}
   mirrorForReminders();
   finishLoad();
@@ -1010,6 +1026,11 @@ function loadPdfJs(){
   return pdfjsPromise;
 }
 const AMT_RE=/^\(?-?£?\s?\d{1,3}(?:,\d{3})*\.\d{2}\)?(?:\s?(?:CR|DR|D|C|-))?$/i;
+const CODE_IN=/(^|[\s.])(FPI|BGC|DEP|CR|BACS)(?=[\s.]|$)/;
+const CODE_OUT=/(^|[\s.])(FPO|DEB|DD|SO|CPT|CHG|D\/D|S\/O)(?=[\s.]|$)/;
+const INCOME_WORDS=/student loans company|salary|wages|payroll|universal credit|\bdwp\b|refund|transfer from|interest paid|received from/i;
+const CODE_TOKENS=/(^|\s)(DEB|DD|SO|FPO|FPI|BGC|CPT|TFR|CHG|DEP|COR|BACS|D\/D|S\/O)(?=\s|$)/g;
+function cleanNote(s){return String(s||"").replace(/(^|\s)\.+(?=\s|$)/g," ").replace(/^[\s.]+|[\s.]+$/g,"").replace(CODE_TOKENS," ").replace(/\s{2,}/g," ").replace(/^[\s.]+|[\s.]+$/g,"").trim().slice(0,80);}
 const TYPE_CODES=/\s+(DEB|DD|SO|FPO|FPI|BGC|CPT|TFR|CHG|BP|DEP|PAY|CR|DR|COR|FEE|INT|CSH|ATM|POS|BAC|D\/D|S\/O)$/i;
 function amtVal(s){const neg=/^\(|\)$|-$|^-|DR$|D$/i.test(s.trim())&&!/CR$|C$/i.test(s.trim());const n=parseFloat(s.replace(/[^0-9.]/g,""));return {n,neg};}
 const MONTHS3="jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec";
@@ -1041,10 +1062,12 @@ async function pdfItems(buf){
   for(const ln of lines){
     ln.items.sort((a,b)=>a.x-b.x);
     // split items that glue words and an amount together, e.g. "TESCO 23.40"
-    const parts=[];ln.items.forEach(it=>{const bits=it.s.split(/\s{2,}/);if(bits.length===1){parts.push(it);return;}let x=it.x;const cw=it.w/Math.max(1,it.s.length);bits.forEach(b=>{parts.push({x,y:it.y,w:b.length*cw,s:b.trim()});x+=(b.length+2)*cw;});});
+    const raw=[];ln.items.forEach(it=>{const bits=it.s.split(/\s{2,}/);if(bits.length===1){raw.push(it);return;}let x=it.x;const cw=it.w/Math.max(1,it.s.length);bits.forEach(b=>{raw.push({x,y:it.y,w:b.length*cw,s:b.trim()});x+=(b.length+2)*cw;});});
+    const parts=raw.map(p=>({...p,s:p.s.replace(/^\.+\s*|\s*\.+$/g,"").trim()})).filter(p=>p.s);
+    if(!parts.length)continue;
     const text=parts.map(p=>p.s).join(" ");const low=text.toLowerCase();
     // header row: remember where the money-out / money-in / balance columns are
-    if(/balance/.test(low)&&/(out|debit|withdraw|payments?|paid)/.test(low)&&/(\bin\b|credit|deposit|receipts?|paid in)/.test(low)&&!AMT_RE.test(parts[parts.length-1].s)){
+    if(!LEAD_DATE.test(text)&&/balance/.test(low)&&/(out|debit|withdraw|payments?|paid)/.test(low)&&/(\bin\b|credit|deposit|receipts?|paid in)/.test(low)&&!AMT_RE.test(parts[parts.length-1].s)){
       const c={};parts.forEach(p=>{const l=p.s.toLowerCase();const r=p.x+p.w;
         if(/balance/.test(l))c.bal=r;else if(/out|debit|withdraw|payments?(?! in)|paid out/.test(l))c.out=r;else if(/\bin\b|credit|deposit|receipt/.test(l))c.in=r;});
       if(c.out!=null||c.in!=null)cols=c;continue;}
@@ -1057,23 +1080,30 @@ async function pdfItems(buf){
     if(d)lastDate=d;else if(lastDate&&!/^\d/.test(text))d=lastDate;else{skipped++;continue;}
     const firstAmtX=amts[0].x;
     let desc=parts.filter(p=>p.x<firstAmtX&&!AMT_RE.test(p.s)).map(p=>p.s).join(" ");
-    if(m)desc=desc.replace(LEAD_DATE,"").trim();
-    desc=desc.replace(TYPE_CODES,"").replace(/^(DEB|DD|SO|FPO|FPI|BGC|CPT|TFR|BP|DEP)\s+/i,"").replace(/\s{2,}/g," ").trim().slice(0,80);
-    let v=null,bal=null;
+    if(m)desc=desc.replace(LEAD_DATE,"");
+    desc=cleanNote(desc);
+    // Work out the amount and, separately, which way the money went.
+    let amt=null,bal=null,colDir=null;
     if(cols){
-      let outAmt=null,inAmt=null;
       amts.forEach(a=>{const r=a.x+a.w;const cand=[["out",cols.out],["in",cols.in],["bal",cols.bal]].filter(c=>c[1]!=null).map(c=>[c[0],Math.abs(c[1]-r)]).sort((x,y)=>x[1]-y[1]);
         const k=cand[0]&&cand[0][0];const av=amtVal(a.s);
-        if(k==="bal")bal=av.neg?-av.n:av.n;else if(k==="out")outAmt=av.n;else if(k==="in")inAmt=av.n;});
-      if(outAmt!=null)v=-outAmt;else if(inAmt!=null)v=inAmt;
+        if(k==="bal")bal=av.neg?-av.n:av.n;else if((k==="out"||k==="in")&&amt==null){amt=av.n;colDir=k;}});
     }
-    if(v==null){
-      const first=amtVal(amts[0].s);
-      if(amts.length>=2){const lb=amtVal(amts[amts.length-1].s);bal=lb.neg?-lb.n:lb.n;}
-      if(first.neg)v=-first.n;
-      else if(bal!=null&&prevBal!=null){v=Math.abs((bal-prevBal)-(-first.n))<0.011?-first.n:Math.abs((bal-prevBal)-first.n)<0.011?first.n:-first.n;}
-      else{v=/salary|wages|universal credit|dwp|hmrc|refund|transfer from|interest paid|received|bgc|fpi/i.test(text)?first.n:-first.n;unsure++;}
-    }
+    const first=amtVal(amts[0].s);
+    if(amt==null)amt=first.n;
+    if(bal==null&&amts.length>=2){const lb=amtVal(amts[amts.length-1].s);bal=lb.neg?-lb.n:lb.n;}
+    let dir=null;
+    // 1. The running balance is the most reliable: did it go up or down by this amount?
+    if(bal!=null&&prevBal!=null){const delta=bal-prevBal;if(Math.abs(delta+amt)<0.011)dir="out";else if(Math.abs(delta-amt)<0.011)dir="in";}
+    // 2. Bank type codes, e.g. Lloyds FPI/BGC = money in, DEB/DD/FPO = money out
+    if(!dir){if(CODE_IN.test(text))dir="in";else if(CODE_OUT.test(text))dir="out";}
+    // 3. Which column the amount sits under
+    if(!dir&&colDir)dir=colDir;
+    // 4. A minus sign or brackets
+    if(!dir&&first.neg)dir="out";
+    // 5. Words that only appear on money coming in
+    if(!dir){dir=INCOME_WORDS.test(text)?"in":"out";unsure++;}
+    const v=dir==="in"?amt:-amt;
     if(bal!=null)prevBal=bal;
     if(!(Math.abs(v)>0)){skipped++;continue;}
     items.push({d,v,note:desc,bankCat:""});

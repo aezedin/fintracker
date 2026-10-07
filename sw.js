@@ -1,5 +1,5 @@
 /* Abdu's Fintracker service worker: offline cache + notifications */
-const VERSION = "fintracker-v5";
+const VERSION = "fintracker-v6";
 const FILES = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png", "./apple-touch-icon.png"];
 
 self.addEventListener("install", (e) => {
