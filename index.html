@@ -1043,8 +1043,12 @@ document.addEventListener("change",e=>{
 
 render();
 initStore();
-if("serviceWorker" in navigator){window.addEventListener("load",()=>{navigator.serviceWorker.register("sw.js").catch(()=>{});});}
-document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible")render();});
+let swReg=null,reloading=false;
+if("serviceWorker" in navigator){
+  window.addEventListener("load",()=>{navigator.serviceWorker.register("sw.js",{updateViaCache:"none"}).then(r=>{swReg=r;}).catch(()=>{});});
+  navigator.serviceWorker.addEventListener("controllerchange",()=>{if(reloading||$("#sheetRoot").innerHTML)return;reloading=true;location.reload();});
+}
+document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible"){render();if(swReg)swReg.update().catch(()=>{});}});
 })();
 </script>
 </body>

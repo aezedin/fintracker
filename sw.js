@@ -1,5 +1,5 @@
 /* Abdu's Fintracker service worker: offline cache + notifications */
-const VERSION = "fintracker-v2";
+const VERSION = "fintracker-v3";
 const FILES = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png", "./apple-touch-icon.png"];
 
 self.addEventListener("install", (e) => {
@@ -14,12 +14,13 @@ self.addEventListener("activate", (e) => {
   );
 });
 
-// Network first for the page (so updates arrive), cache as the offline fallback.
+// Network first, skipping the browser's own short-term cache, so updates show up on the next open.
+// The saved copy is only used when there's no signal.
 self.addEventListener("fetch", (e) => {
   const req = e.request;
   if (req.method !== "GET" || new URL(req.url).origin !== self.location.origin) return;
   e.respondWith(
-    fetch(req)
+    fetch(req, { cache: "no-cache" })
       .then((res) => {
         if (res.ok) { const copy = res.clone(); caches.open(VERSION).then((c) => c.put(req, copy)); }
         return res;
